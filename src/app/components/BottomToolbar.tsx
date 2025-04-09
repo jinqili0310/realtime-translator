@@ -4,29 +4,19 @@ import { SessionStatus } from "@/app/types";
 interface BottomToolbarProps {
   sessionStatus: SessionStatus;
   onToggleConnection: () => void;
-  isPTTActive: boolean;
-  setIsPTTActive: (val: boolean) => void;
   isPTTUserSpeaking: boolean;
-  handleTalkButtonDown: () => void;
-  handleTalkButtonUp: () => void;
+  onToggleRecording: () => void;
   isEventsPaneExpanded: boolean;
   setIsEventsPaneExpanded: (val: boolean) => void;
-  isAudioPlaybackEnabled: boolean;
-  setIsAudioPlaybackEnabled: (val: boolean) => void;
 }
 
 function BottomToolbar({
   sessionStatus,
   onToggleConnection,
-  isPTTActive,
-  setIsPTTActive,
   isPTTUserSpeaking,
-  handleTalkButtonDown,
-  handleTalkButtonUp,
+  onToggleRecording,
   isEventsPaneExpanded,
   setIsEventsPaneExpanded,
-  isAudioPlaybackEnabled,
-  setIsAudioPlaybackEnabled,
 }: BottomToolbarProps) {
   const isConnected = sessionStatus === "CONNECTED";
   const isConnecting = sessionStatus === "CONNECTING";
@@ -50,68 +40,42 @@ function BottomToolbar({
   }
 
   return (
-    <div className="p-4 flex flex-row items-center justify-center gap-x-8">
-      <button
-        onClick={onToggleConnection}
-        className={getConnectionButtonClasses()}
-        disabled={isConnecting}
-      >
-        {getConnectionButtonLabel()}
-      </button>
-
-      <div className="flex flex-row items-center gap-2">
-        <input
-          id="push-to-talk"
-          type="checkbox"
-          checked={isPTTActive}
-          onChange={e => setIsPTTActive(e.target.checked)}
-          disabled={!isConnected}
-          className="w-4 h-4"
-        />
-        <label htmlFor="push-to-talk" className="flex items-center cursor-pointer">
-          Push to talk
-        </label>
+    <div className="flex items-center justify-between p-2 bg-white border-t border-gray-200">
+      <div className="flex items-center gap-2">
         <button
-          onMouseDown={handleTalkButtonDown}
-          onMouseUp={handleTalkButtonUp}
-          onTouchStart={handleTalkButtonDown}
-          onTouchEnd={handleTalkButtonUp}
-          disabled={!isPTTActive}
-          className={
-            (isPTTUserSpeaking ? "bg-gray-300" : "bg-gray-200") +
-            " py-1 px-4 cursor-pointer rounded-full" +
-            (!isPTTActive ? " bg-gray-100 text-gray-400" : "")
-          }
+          className={getConnectionButtonClasses()}
+          onClick={onToggleConnection}
+          disabled={isConnecting}
         >
-          Talk
+          {getConnectionButtonLabel()}
         </button>
       </div>
 
-      <div className="flex flex-row items-center gap-2">
-        <input
-          id="audio-playback"
-          type="checkbox"
-          checked={isAudioPlaybackEnabled}
-          onChange={e => setIsAudioPlaybackEnabled(e.target.checked)}
+      <div className="flex items-center justify-center gap-4">
+        <button
+          className={`text-white text-base p-2 w-36 rounded-full h-full ${
+            isPTTUserSpeaking
+              ? "bg-red-600 hover:bg-red-700"
+              : "bg-blue-600 hover:bg-blue-700"
+          } ${isConnected ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}
+          onClick={onToggleRecording}
           disabled={!isConnected}
-          className="w-4 h-4"
-        />
-        <label htmlFor="audio-playback" className="flex items-center cursor-pointer">
-          Audio playback
-        </label>
+        >
+          {isPTTUserSpeaking ? "Stop Recording" : "Start Recording"}
+        </button>
       </div>
 
-      <div className="flex flex-row items-center gap-2">
-        <input
-          id="logs"
-          type="checkbox"
-          checked={isEventsPaneExpanded}
-          onChange={e => setIsEventsPaneExpanded(e.target.checked)}
-          className="w-4 h-4"
-        />
-        <label htmlFor="logs" className="flex items-center cursor-pointer">
-          Logs
-        </label>
+      <div className="flex items-center gap-2">
+        <button
+          className={`text-white text-base p-2 w-36 rounded-full h-full ${
+            isEventsPaneExpanded
+              ? "bg-gray-600 hover:bg-gray-700"
+              : "bg-gray-400 hover:bg-gray-500"
+          } cursor-pointer`}
+          onClick={() => setIsEventsPaneExpanded(!isEventsPaneExpanded)}
+        >
+          {isEventsPaneExpanded ? "Hide Logs" : "Show Logs"}
+        </button>
       </div>
     </div>
   );
