@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
 
 import Image from "next/image";
@@ -17,6 +17,8 @@ import { AgentConfig, SessionStatus } from "@/app/types";
 import { useTranscript } from "@/app/contexts/TranscriptContext";
 import { useEvent } from "@/app/contexts/EventContext";
 import { useHandleServerEvent } from "./hooks/useHandleServerEvent";
+import { useSpeaker } from './contexts/SpeakerContext';
+import { useLanguagePair } from "./hooks/useLanguagePair";
 
 // Utilities
 import { createRealtimeConnection } from "./lib/realtimeConnection";
@@ -28,21 +30,28 @@ function App() {
   const { transcriptItems, addTranscriptMessage, addTranscriptBreadcrumb } =
     useTranscript();
   const { logClientEvent, logServerEvent } = useEvent();
+  const { 
+    state: speakerState,
+    addSpeaker,
+    updateSpeaker,
+    setSpeakerInactive,
+    getActiveSpeakers,
+    getSpeakerById,
+    getTranslationDirection
+  } = useSpeaker();
+  const { lockedLanguagePair } = useLanguagePair();
 
   const [selectedAgentName, setSelectedAgentName] = useState<string>("");
   const [selectedAgentConfigSet, setSelectedAgentConfigSet] =
     useState<AgentConfig[] | null>(null);
 
   // Add state for language information
-  const [mainLanguage, setMainLanguage] = useState<{code: string, name: string}>({code: "zh", name: "Chinese"});
-  const [targetLanguage, setTargetLanguage] = useState<{code: string, name: string}>({code: "en", name: "English"});
+  const [activeLanguages, setActiveLanguages] = useState<Array<{code: string, name: string}>>([
+    { code: "zh", name: "Chinese" },
+    { code: "en", name: "English" }
+  ]);
   const [languagesDetected, setLanguagesDetected] = useState<boolean>(true);
-  // const [speakerCount, setSpeakerCount] = useState<number>(0);
-  // const [lastSpeaker, setLastSpeaker] = useState<string>("");
-
-  // Add a state to track when languages are newly detected for UI animation
-  const [mainLangJustDetected, setMainLangJustDetected] = useState<boolean>(false);
-  const [targetLangJustDetected, setTargetLangJustDetected] = useState<boolean>(false);
+  const [languagesJustDetected, setLanguagesJustDetected] = useState<boolean>(false);
 
   const [dataChannel, setDataChannel] = useState<RTCDataChannel | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -57,10 +66,7 @@ function App() {
   const [isPTTUserSpeaking, setIsPTTUserSpeaking] = useState<boolean>(false);
 
   // Add state for tracking speaker languages by speaker ID rather than role
-  const [speakerLanguages, setSpeakerLanguages] = useState<Array<{speakerId: string, language: {code: string, name: string}, timestamp: number}>>([
-    {speakerId: "initial-zh", language: {code: "zh", name: "Chinese"}, timestamp: Date.now() - 1000},
-    {speakerId: "initial-en", language: {code: "en", name: "English"}, timestamp: Date.now()}
-  ]);
+  const [speakerLanguages, setSpeakerLanguages] = useState<Array<{speakerId: string, language: {code: string, name: string}, timestamp: number}>>([]);
 
   const sendClientEvent = (eventObj: any, eventNameSuffix = "") => {
     if (dcRef.current && dcRef.current.readyState === "open") {
@@ -78,15 +84,65 @@ function App() {
     }
   };
 
+  // Add translateAndSpeak function
+  const translateAndSpeak = useCallback(async (text: string, sourceLang: string, targetLang: string) => {
+    try {
+      // Only translate if source and target languages are different
+      if (sourceLang === targetLang) {
+        console.log(`Skipping translation: same language (${sourceLang})`);
+        return null;
+      }
+
+      // Call the translation API
+      const response = await fetch('/api/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: "gpt-4-turbo-preview",
+          messages: [
+            {
+              role: "system",
+              content: `You are a translation system. Translate the following text from ${sourceLang} to ${targetLang}. Only output the translated text, no explanations or additional text.`
+            },
+            {
+              role: "user",
+              content: text
+            }
+          ]
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Translation failed');
+      }
+
+      const data = await response.json();
+      return data.choices[0].message.content.trim();
+    } catch (error) {
+      console.error('Error in translateAndSpeak:', error);
+      return null;
+    }
+  }, []);
+
+  // Add message handler
+  const addMessage = useCallback((message: { id: string; role: "user" | "assistant"; content: string; timestamp: number }) => {
+    addTranscriptMessage(message.id, message.role, message.content);
+  }, [addTranscriptMessage]);
+
+  // Initialize handleServerEvent
   const handleServerEventRef = useHandleServerEvent({
     setSessionStatus,
     selectedAgentName,
     selectedAgentConfigSet,
     sendClientEvent,
     setSelectedAgentName,
-    mainLanguage,
-    targetLanguage,
+    activeLanguages,
     languagesDetected,
+    speakerLanguages,
+    translateAndSpeak,
+    addMessage
   });
 
   useEffect(() => {
@@ -178,7 +234,9 @@ function App() {
         logClientEvent({ error: err }, "data_channel.error");
       });
       dc.addEventListener("message", (e: MessageEvent) => {
-        handleServerEventRef.current(JSON.parse(e.data));
+        if (handleServerEventRef.current) {
+          handleServerEventRef.current(JSON.parse(e.data));
+        }
       });
 
       setDataChannel(dc);
@@ -251,7 +309,7 @@ function App() {
       session: {
         modalities: ["text", "audio"],
         instructions,
-        voice: "coral",
+        voice: "shimmer",
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
         input_audio_transcription: { model: "whisper-1" },
@@ -419,11 +477,14 @@ function App() {
     return false;
   };
 
-  // Array to track speaker languages in chronological order
-  const [speakerSequence, setSpeakerSequence] = useState<Array<{
-    id: string,
-    language: {code: string, name: string}
-  }>>([]);
+  // Add effect to update UI when language pair changes
+  useEffect(() => {
+    if (lockedLanguagePair) {
+      setActiveLanguages([lockedLanguagePair.source, lockedLanguagePair.target]);
+      setLanguagesJustDetected(true);
+      setTimeout(() => setLanguagesJustDetected(false), 1000);
+    }
+  }, [lockedLanguagePair]);
 
   // Update speaker sequence and languages when new messages are detected
   useEffect(() => {
@@ -445,8 +506,8 @@ function App() {
     const chronologicalMessages = [...messageItems].sort((a, b) => a.createdAtMs - b.createdAtMs);
     
     // Track new speakers and their languages
-    const newSpeakerSequence = [...speakerSequence];
-    let sequenceChanged = false;
+    const newSpeakerLanguages = [...speakerLanguages];
+    let languagesChanged = false;
     
     // Process each message to identify speakers
     for (const message of chronologicalMessages) {
@@ -455,58 +516,135 @@ function App() {
         if (!detectedLang) continue;
         
         // Create unique speaker ID (could be enhanced in a real app with actual user IDs)
-        // For now, use a combination of role and a portion of the item ID
         const speakerId = `${message.role}-${message.itemId.split('-')[0]}`;
         
-        // Check if this exact speaker already exists in our sequence
-        const existingIndex = newSpeakerSequence.findIndex(s => s.id === speakerId);
+        // Check if this speaker already exists
+        const existingIndex = newSpeakerLanguages.findIndex(s => s.speakerId === speakerId);
         
         if (existingIndex === -1) {
           // New speaker detected - add to sequence
-          newSpeakerSequence.push({
-            id: speakerId,
-            language: detectedLang
+          newSpeakerLanguages.push({
+            speakerId,
+            language: detectedLang,
+            timestamp: message.createdAtMs
           });
-          sequenceChanged = true;
+          languagesChanged = true;
           console.log(`New speaker detected: ${speakerId} speaking ${detectedLang.name}`);
+        } else {
+          // Update existing speaker's timestamp
+          newSpeakerLanguages[existingIndex].timestamp = message.createdAtMs;
         }
       }
     }
     
     // If the speaker sequence changed, update state and language settings
-    if (sequenceChanged) {
-      setSpeakerSequence(newSpeakerSequence);
+    if (languagesChanged) {
+      setSpeakerLanguages(newSpeakerLanguages);
       
-      // Always use the last two speakers for translation
-      if (newSpeakerSequence.length >= 2) {
-        const lastTwoSpeakers = newSpeakerSequence.slice(-2);
+      // Sort speakers by most recent timestamp
+      const sortedSpeakers = [...newSpeakerLanguages].sort((a, b) => b.timestamp - a.timestamp);
+      
+      // Get the two most recent speakers
+      if (sortedSpeakers.length >= 2) {
+        const [mostRecent, secondMostRecent] = sortedSpeakers;
         
-        // Update main language (second-to-last speaker)
-        const newMainLang = lastTwoSpeakers[0].language;
-        if (newMainLang && newMainLang.code !== mainLanguage.code) {
-          setMainLanguage(newMainLang);
-          setMainLangJustDetected(true);
-          setTimeout(() => setMainLangJustDetected(false), 2000);
-          console.log(`Updated main language to: ${newMainLang.name} (${newMainLang.code})`);
-        }
-        
-        // Update target language (most recent speaker)
-        const newTargetLang = lastTwoSpeakers[1].language;
-        if (newTargetLang && newTargetLang.code !== targetLanguage.code) {
-          setTargetLanguage(newTargetLang);
-          setTargetLangJustDetected(true);
-          setTimeout(() => setTargetLangJustDetected(false), 2000);
-          console.log(`Updated target language to: ${newTargetLang.name} (${newTargetLang.code})`);
-        }
-        
-        // Mark languages as detected if not already
-        if (!languagesDetected) {
-          setLanguagesDetected(true);
-          console.log("Both languages have been detected and set");
+        // Only update active languages if they are different
+        if (mostRecent.language.code !== secondMostRecent.language.code) {
+          setActiveLanguages([mostRecent.language, secondMostRecent.language]);
+          setLanguagesJustDetected(true);
+          setTimeout(() => setLanguagesJustDetected(false), 1000);
         }
       }
     }
-  }, [transcriptItems, speakerSequence]);
+  }, [transcriptItems, speakerLanguages]);
+
+  // Update the language detection handler
+  const handleLanguageDetection = (text: string, speakerId: string) => {
+    const detectedLanguage = detectLanguage(text);
+    if (!detectedLanguage) return null;
+
+    const existingSpeaker = speakerLanguages.find(s => s.speakerId === speakerId);
+    
+    if (!existingSpeaker) {
+      // New speaker detected
+      setSpeakerLanguages(prev => [...prev, {
+        speakerId,
+        language: detectedLanguage,
+        timestamp: Date.now()
+      }]);
+      
+      // Update active languages if we have at least one other speaker with a different language
+      if (speakerLanguages.length > 0) {
+        const mostRecentSpeaker = [...speakerLanguages].sort((a, b) => b.timestamp - a.timestamp)[0];
+        if (mostRecentSpeaker.language.code !== detectedLanguage.code) {
+          setActiveLanguages([detectedLanguage, mostRecentSpeaker.language]);
+          setLanguagesJustDetected(true);
+          setTimeout(() => setLanguagesJustDetected(false), 1000);
+        }
+      }
+    } else if (existingSpeaker.language.code !== detectedLanguage.code) {
+      // Update speaker's language if it changed
+      setSpeakerLanguages(prev => prev.map(s => 
+        s.speakerId === speakerId 
+          ? {...s, language: detectedLanguage, timestamp: Date.now()}
+          : s
+      ));
+      
+      // Update active languages if this speaker is one of the active ones and the language is different
+      setActiveLanguages(prev => {
+        if (prev.some(lang => lang.code === existingSpeaker.language.code)) {
+          const newLanguages = prev.map(lang => 
+            lang.code === existingSpeaker.language.code ? detectedLanguage : lang
+          );
+          // Only update if the languages are different
+          if (newLanguages[0].code !== newLanguages[1].code) {
+            setLanguagesJustDetected(true);
+            setTimeout(() => setLanguagesJustDetected(false), 1000);
+            return newLanguages;
+          }
+        }
+        return prev;
+      });
+    }
+
+    return detectedLanguage;
+  };
+
+  // Modify the message handling to include translation direction
+  const handleNewMessage = (text: string, role: 'user' | 'assistant') => {
+    if (role === 'user') {
+      // Get the current active speakers to determine if we need a new speaker
+      const activeSpeakers = getActiveSpeakers();
+      let speakerId: string;
+      
+      // Try to find an existing active speaker
+      const existingSpeaker = activeSpeakers.find(([_, info]) => info.isActive);
+      
+      if (existingSpeaker) {
+        speakerId = existingSpeaker[0];
+      } else {
+        // Create a new speaker if none exists
+        speakerId = `user-${Date.now()}`;
+      }
+      
+      const detectedLanguage = handleLanguageDetection(text, speakerId);
+      
+      if (detectedLanguage) {
+        // Get translation direction before adding the message
+        const translationDirection = getTranslationDirection(speakerId);
+        
+        // Add original message to transcript
+        addTranscriptMessage(speakerId, role, text, true);
+        
+        // if (translationDirection && translationDirection.source.code !== translationDirection.target.code) {
+        //   // Add translation message immediately after
+        //   const translationId = `translation-${speakerId}`;
+        //   const translatedText = `[${translationDirection.source.code} → ${translationDirection.target.code}] ${text}`;
+        //   addTranscriptMessage(translationId, 'assistant', translatedText, false);
+        // }
+      }
+    }
+  };
 
   return (
     <div className="text-base flex flex-col h-screen bg-gray-100 text-gray-800 relative">
@@ -526,26 +664,13 @@ function App() {
           </div>
         </div>
         <div className="flex items-center gap-4 text-sm text-gray-600">
-          <div className="flex items-center gap-2">
-            <span className="font-medium">Main:</span>
-            <span className={`px-2 py-1 rounded transition-all duration-300 ${
-              mainLangJustDetected 
-                ? 'bg-blue-200 scale-110' 
-                : 'bg-gray-100'
-            }`}>
-              {mainLanguage.name} ({mainLanguage.code})
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="font-medium">Target:</span>
-            <span className={`px-2 py-1 rounded transition-all duration-300 ${
-              targetLangJustDetected 
-                ? 'bg-blue-200 scale-110' 
-                : 'bg-gray-100'
-            }`}>
-              {targetLanguage.name} ({targetLanguage.code})
-            </span>
-          </div>
+          {activeLanguages.length >= 2 && (
+            <div className={`flex items-center space-x-2 transition-all duration-500 ${languagesJustDetected ? 'scale-110' : ''}`}>
+              <span className="text-lg font-semibold">{activeLanguages[0].name}</span>
+              <span className="text-lg">↔</span>
+              <span className="text-lg font-semibold">{activeLanguages[1].name}</span>
+            </div>
+          )}
         </div>
       </div>
 

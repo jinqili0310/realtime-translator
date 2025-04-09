@@ -3,29 +3,91 @@
 import { ServerEvent, SessionStatus, AgentConfig } from "@/app/types";
 import { useTranscript } from "@/app/contexts/TranscriptContext";
 import { useEvent } from "@/app/contexts/EventContext";
-import { useRef } from "react";
+import { useRef, useState, useCallback } from "react";
+import { useLanguagePair } from "./useLanguagePair";
+import { SpeakerInfo } from "@/app/types";
 
-export interface UseHandleServerEventParams {
+interface UseHandleServerEventParams {
   setSessionStatus: (status: SessionStatus) => void;
   selectedAgentName: string;
   selectedAgentConfigSet: AgentConfig[] | null;
   sendClientEvent: (eventObj: any, eventNameSuffix?: string) => void;
   setSelectedAgentName: (name: string) => void;
-  mainLanguage: {code: string, name: string};
-  targetLanguage: {code: string, name: string};
+  activeLanguages: Array<{code: string, name: string}>;
   languagesDetected: boolean;
+  speakerLanguages: Array<{speakerId: string, language: {code: string, name: string}, timestamp: number}>;
+  translateAndSpeak: (text: string, sourceLang: string, targetLang: string) => Promise<string | null>;
+  addMessage: (message: { id: string; role: "user" | "assistant"; content: string; timestamp: number }) => void;
 }
 
-export function useHandleServerEvent({
+interface TranslationDirection {
+  source: string;
+  target: string;
+}
+
+interface SpeakerLanguage {
+  speakerId: string;
+  language: {code: string, name: string};
+  timestamp: number;
+}
+
+interface LockedLanguagePair {
+  source: {code: string, name: string};
+  target: {code: string, name: string};
+  speakers: string[];
+}
+
+interface AudioTranscriptionCompleteEvent {
+  transcription: string;
+  speakerId: string;
+}
+
+interface ResponseDoneEvent {
+  response: string;
+  speakerId: string;
+}
+
+interface ServerResponseOutput {
+  type?: string;
+  name?: string;
+  arguments?: any;
+  call_id?: string;
+  text?: string;
+  transcript?: string;
+  status_details?: {
+    error?: any;
+  };
+}
+
+// Extend the ServerEvent type
+declare module "@/app/types" {
+  interface ServerEvent {
+    response?: {
+      output?: {
+        type?: string;
+        name?: string;
+        arguments?: any;
+        call_id?: string;
+      }[];
+      status_details?: {
+        error?: any;
+      };
+    };
+  }
+}
+
+export const useHandleServerEvent = ({
   setSessionStatus,
   selectedAgentName,
   selectedAgentConfigSet,
   sendClientEvent,
   setSelectedAgentName,
-  mainLanguage,
-  targetLanguage,
+  activeLanguages,
   languagesDetected,
-}: UseHandleServerEventParams) {
+  speakerLanguages,
+  translateAndSpeak,
+  addMessage
+}: UseHandleServerEventParams) => {
   const {
     transcriptItems,
     addTranscriptBreadcrumb,
@@ -35,6 +97,16 @@ export function useHandleServerEvent({
   } = useTranscript();
 
   const { logServerEvent } = useEvent();
+  const { 
+    getActiveSpeakers,
+    updateSpeakerActivity,
+    handleNewSpeaker,
+    lockedLanguagePair,
+    activeSpeakers,
+    getTranslationDirection
+  } = useLanguagePair();
+
+  const handleServerEventRef = useRef<((event: any) => void) | null>(null);
 
   // Helper function to check if text is already a translation
   const isTranslationMessage = (text: string) => {
@@ -45,51 +117,7 @@ export function useHandleServerEvent({
       return true;
     }
 
-    // Common patterns that might appear in translations from function calls
     return false;
-  };
-
-  // Helper function to translate text and play TTS
-  const translateAndSpeak = async (text: string, sourceLanguage: string, targetLanguage: string, role: "user" | "assistant") => {
-    if (!text || text === "[inaudible]" || text === "[Transcribing...]") return;
-    
-    // Skip translation if the text already appears to be a translation
-    if (isTranslationMessage(text)) {
-      return;
-    }
-
-    try {
-      // In a real implementation, this would call a translation API
-      // For this demo, we'll simulate translation with simple prefixes
-      const translatedText = `[${sourceLanguage} → ${targetLanguage}] ${text}`;
-      
-      // Add the translation as a new message only if it's not already a translation message
-      const translationId = `translation-${Date.now()}`;
-      
-      // Check if this translation already exists in the transcript
-      const translationExists = transcriptItems.some(item => 
-        item.title === translatedText || 
-        (item.title && item.title.includes(text) && isTranslationMessage(item.title))
-      );
-      
-      if (!translationExists) {
-        console.log(`Translating from ${sourceLanguage} to ${targetLanguage}: "${text.substring(0, 20)}..."`);
-        addTranscriptMessage(translationId, role, translatedText, true);
-        
-        // In a real implementation, this would trigger TTS
-        // For this demo, we'll request audio playback via the API
-        sendClientEvent({
-          type: "conversation.item.create",
-          item: {
-            type: "message",
-            role: "assistant", // Always treat translation as assistant to get voice output
-            content: [{ type: "text", text: translatedText }],
-          },
-        }, `(translation ${sourceLanguage} to ${targetLanguage})`);
-      }
-    } catch (error) {
-      console.error("Translation error:", error);
-    }
   };
 
   const handleFunctionCall = async (functionCallParams: {
@@ -107,8 +135,8 @@ export function useHandleServerEvent({
     // For translation functions, modify the target language to match our UI settings
     if (functionCallParams.name === "translate_text") {
       // Get the current main and target languages from our UI state
-      const sourceCode = mainLanguage.code;
-      const targetCode = targetLanguage.code;
+      const sourceCode = activeLanguages[0].code;
+      const targetCode = activeLanguages[1].code;
       
       // Override the function arguments with our UI languages
       if (args.source_language && args.target_language) {
@@ -252,6 +280,108 @@ export function useHandleServerEvent({
     }
   };
 
+  const handleAudioTranscriptionComplete = useCallback(async (event: AudioTranscriptionCompleteEvent) => {
+    const { transcription, speakerId } = event;
+    
+    // Get translation direction based on locked language pair
+    const direction = getTranslationDirection(speakerId);
+    if (!direction) {
+      console.log('No translation direction available');
+      return;
+    }
+
+    // Only translate if source and target languages are different
+    if (direction.source.code === direction.target.code) {
+      console.log(`Skipping translation: same language detected (${direction.source.code})`);
+      return;
+    }
+
+    try {
+      if (!translateAndSpeak || typeof translateAndSpeak !== 'function') {
+        console.error('translateAndSpeak is not a function');
+        return;
+      }
+
+      console.log(`Translation direction: ${direction.source.code} → ${direction.target.code}`);
+
+      // Check if this is already a translation message
+      if (isTranslationMessage(transcription)) {
+        console.log('Skipping translation: message is already a translation');
+        return;
+      }
+
+      // Translate the transcription
+      const translatedText = await translateAndSpeak(
+        transcription,
+        direction.source.code,
+        direction.target.code
+      );
+
+      if (translatedText) {
+        const translationId = `translation-${speakerId}-${Date.now()}`;
+        addMessage({
+          id: translationId,
+          role: 'assistant',
+          content: `[${direction.source.code} → ${direction.target.code}] ${translatedText}`,
+          timestamp: Date.now()
+        });
+      }
+    } catch (error) {
+      console.error('Error in translation:', error);
+    }
+  }, [getTranslationDirection, translateAndSpeak, addMessage, isTranslationMessage]);
+
+  const handleResponseDone = useCallback(async (event: ResponseDoneEvent) => {
+    const { response, speakerId } = event;
+    
+    // Get translation direction based on locked language pair
+    const direction = getTranslationDirection(speakerId);
+    if (!direction) {
+      console.log('No translation direction available');
+      return;
+    }
+
+    // Only translate if source and target languages are different
+    if (direction.source.code === direction.target.code) {
+      console.log(`Skipping translation: same language detected (${direction.source.code})`);
+      return;
+    }
+
+    try {
+      if (!translateAndSpeak || typeof translateAndSpeak !== 'function') {
+        console.error('translateAndSpeak is not a function');
+        return;
+      }
+
+      console.log(`Translation direction: ${direction.source.code} → ${direction.target.code}`);
+
+      // Check if this is already a translation message
+      if (isTranslationMessage(response)) {
+        console.log('Skipping translation: message is already a translation');
+        return;
+      }
+
+      // Translate the assistant's response
+      const translatedText = await translateAndSpeak(
+        response,
+        direction.target.code, // Assistant speaks in target language
+        direction.source.code  // Translate to source language
+      );
+
+      if (translatedText) {
+        const translationId = `translation-${speakerId}-${Date.now()}`;
+        addMessage({
+          id: translationId,
+          role: 'assistant',
+          content: `[${direction.target.code} → ${direction.source.code}] ${translatedText}`,
+          timestamp: Date.now()
+        });
+      }
+    } catch (error) {
+      console.error('Error in translation:', error);
+    }
+  }, [getTranslationDirection, translateAndSpeak, addMessage, isTranslationMessage]);
+
   const handleServerEvent = (serverEvent: ServerEvent) => {
     logServerEvent(serverEvent);
 
@@ -319,45 +449,74 @@ export function useHandleServerEvent({
         if (itemId) {
           updateTranscriptMessage(itemId, finalTranscript, false);
           
-          // After transcript is complete, translate the user's message if languages are detected
+          // After transcript is complete, translate if languages are detected
           if (languagesDetected && 
               finalTranscript !== "[inaudible]" &&
-              // Skip translation if the message already appears to be a translation
               !isTranslationMessage(finalTranscript)) {
             
             // Detect the language of this specific message
-            // In a real implementation, you'd call a language detection API
             const detectedLang = detectLanguageSimple(finalTranscript);
             
             if (detectedLang) {
-              // Determine which language to translate to based on the detected language
-              let targetLang;
+              // Check if this language is already in the locked pair
+              const isLanguageInLockedPair = lockedLanguagePair && 
+                (lockedLanguagePair.source.code === detectedLang || 
+                 lockedLanguagePair.target.code === detectedLang);
+
+              // Find existing speaker with this language
+              const existingSpeakerWithLanguage = activeSpeakers.find(s => 
+                s.language.code === detectedLang
+              );
               
-              // If the detected language matches the main language, translate to target
-              if (detectedLang === mainLanguage.code) {
-                targetLang = targetLanguage.code;
+              let speakerId = itemId;
+              if (existingSpeakerWithLanguage) {
+                // If we found a speaker with the same language, just update their activity
+                speakerId = existingSpeakerWithLanguage.speakerId;
+                updateSpeakerActivity(speakerId, true);
+                console.log(`Speaker activity updated for language: ${detectedLang}`);
+              } else if (!isLanguageInLockedPair) {
+                // Only create a new speaker if this is a new language not in the locked pair
+                handleNewSpeaker(speakerId, { 
+                  code: detectedLang, 
+                  name: getLanguageName(detectedLang) 
+                });
+                console.log(`New language detected: ${detectedLang}`);
               }
-              // If the detected language matches the target language, translate to main
-              else if (detectedLang === targetLanguage.code) {
-                targetLang = mainLanguage.code;
+
+              // Only attempt translation if we have a valid language pair and different languages
+              if (lockedLanguagePair && 
+                  lockedLanguagePair.source.code !== lockedLanguagePair.target.code) {
+                handleAudioTranscriptionComplete({
+                  transcription: finalTranscript,
+                  speakerId
+                });
               }
-              // If it's neither, translate to the target language by default
-              else {
-                targetLang = targetLanguage.code;
-              }
-              
-              console.log(`User spoke in ${detectedLang}, translating to ${targetLang}`);
-              
-              // Force immediate translation without waiting for function calls
-              setTimeout(() => {
-                translateAndSpeak(finalTranscript, detectedLang, targetLang, "user");
-              }, 500);
-            } else {
-              // Fallback if we couldn't detect the language
-              setTimeout(() => {
-                translateAndSpeak(finalTranscript, mainLanguage.code, targetLanguage.code, "user");
-              }, 500);
             }
+          }
+        }
+        break;
+      }
+
+      case "conversation.item.assistant.response.done": {
+        const itemId = serverEvent.item_id;
+        const response = serverEvent.response?.output?.[0]?.arguments;
+        if (itemId && response) {
+          updateTranscriptMessage(itemId, response, false);
+          
+          // Get the most recent user speaker
+          const activeSpeakersList = getActiveSpeakers();
+          const mostRecentUserSpeaker = activeSpeakersList.find(s => 
+            s.speakerId.startsWith('user-')
+          );
+
+          // Only translate if we have a valid language pair and different languages
+          if (mostRecentUserSpeaker && 
+              lockedLanguagePair && 
+              lockedLanguagePair.source.code !== lockedLanguagePair.target.code) {
+            handleResponseDone({
+              response,
+              speakerId: mostRecentUserSpeaker.speakerId
+            });
           }
         }
         break;
@@ -385,12 +544,13 @@ export function useHandleServerEvent({
           
           if (assistantMessages.length > 0) {
             const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
-            if (lastAssistantMessage.title) {
-              // The assistant always responds in the target language, so we translate to main
-              setTimeout(() => {
-                translateAndSpeak(lastAssistantMessage.title || "", targetLanguage.code, mainLanguage.code, "assistant");
-              }, 500);
-            }
+            // if (lastAssistantMessage.title) {
+            //   // Get the current active speakers
+            //   // The assistant always responds in the target language, so we translate to main
+            //   setTimeout(() => {
+            //     translateAndSpeak(lastAssistantMessage.title || "", activeLanguages[1].code, activeLanguages[0].code, "assistant");
+            //   }, 500);
+            // }
           }
         }
 
@@ -426,11 +586,10 @@ export function useHandleServerEvent({
     }
   };
 
-  const handleServerEventRef = useRef(handleServerEvent);
   handleServerEventRef.current = handleServerEvent;
 
   return handleServerEventRef;
-}
+};
 
 // Add a simple language detection function
 const detectLanguageSimple = (text: string): string | null => {
@@ -457,4 +616,20 @@ const detectLanguageSimple = (text: string): string | null => {
   
   // Default to English for Latin script
   return "en";
+};
+
+// Helper function to get language name from code
+const getLanguageName = (code: string): string => {
+  const languageNames: Record<string, string> = {
+    'en': 'English',
+    'zh': 'Chinese',
+    'ja': 'Japanese',
+    'ko': 'Korean',
+    'ru': 'Russian',
+    'ar': 'Arabic',
+    'fr': 'French',
+    'es': 'Spanish',
+    'de': 'German'
+  };
+  return languageNames[code] || code;
 };

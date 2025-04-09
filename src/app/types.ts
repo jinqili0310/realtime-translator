@@ -50,6 +50,13 @@ export interface TranscriptItem {
   createdAtMs: number;
   status: "IN_PROGRESS" | "DONE";
   isHidden: boolean;
+  speakerInfo?: {
+    speakerId: string;
+    language: {
+      code: string;
+      name: string;
+    };
+  };
 }
 
 export interface Log {
@@ -105,4 +112,31 @@ export interface LoggedEvent {
   timestamp: string;
   eventName: string;
   eventData: Record<string, any>; // can have arbitrary objects logged
+}
+
+export interface Language {
+  code: string;
+  name: string;
+}
+
+export interface SpeakerInfo {
+  language: Language | null;
+  isActive: boolean;
+  lastSpoken: number;
+}
+
+export interface LockedLanguagePair {
+  main: Language;
+  target: Language;
+  speakerIds: string[];
+}
+
+export interface SpeakerEvent {
+  speakerId: string;
+  language: {
+    code: string;
+    name: string;
+  };
+  timestamp: number;
+  type: 'new' | 'update' | 'inactive';
 }

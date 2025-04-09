@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown";
 import { TranscriptItem } from "@/app/types";
 import Image from "next/image";
 import { useTranscript } from "@/app/contexts/TranscriptContext";
+import { useSpeaker } from '@/app/contexts/SpeakerContext';
 
 export interface TranscriptProps {
   userText: string;
@@ -20,6 +21,7 @@ function Transcript({
   canSend,
 }: TranscriptProps) {
   const { transcriptItems, toggleTranscriptItemExpand } = useTranscript();
+  const { getSpeakerById } = useSpeaker();
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const [prevLogs, setPrevLogs] = useState<TranscriptItem[]>([]);
   const [justCopied, setJustCopied] = useState(false);
@@ -78,10 +80,10 @@ function Transcript({
 
         <div
           ref={transcriptRef}
-          className="overflow-auto p-4 flex flex-col gap-y-4 h-full"
+          className="overflow-auto p-4 flex flex-col gap-y-4 h-full pt-12"
         >
           {transcriptItems.map((item) => {
-            const { itemId, type, role, data, expanded, timestamp, title = "", isHidden } = item;
+            const { itemId, type, role, data, expanded, timestamp, title = "", isHidden, speakerInfo } = item;
 
             if (isHidden) {
               return null;
@@ -96,11 +98,25 @@ function Transcript({
               const messageStyle = isBracketedMessage ? "italic text-gray-400" : "";
               const displayTitle = isBracketedMessage ? title.slice(1, -1) : title;
 
+              // Get speaker info if available
+              const speaker = speakerInfo ? getSpeakerById(speakerInfo.speakerId) : null;
+
+              if (data) {
+                console.log("message:", JSON.stringify(data, null, 2))
+              }
+
               return (
                 <div key={itemId} className={containerClasses}>
                   <div className={bubbleBase}>
-                    <div className={`text-xs ${isUser ? "text-gray-400" : "text-gray-500"} font-mono`}>
-                      {timestamp}
+                    <div className="flex items-center justify-between mb-1">
+                      <div className={`text-xs ${isUser ? "text-gray-400" : "text-gray-500"} font-mono`}>
+                        {timestamp}
+                      </div>
+                      {speaker && (
+                        <div className="text-xs text-gray-400 ml-2">
+                          {speaker.language.name}
+                        </div>
+                      )}
                     </div>
                     <div className={`whitespace-pre-wrap ${messageStyle}`}>
                       <ReactMarkdown>{displayTitle}</ReactMarkdown>
@@ -111,10 +127,11 @@ function Transcript({
             } else if (type === "BREADCRUMB") {
               return (
                 <div
+                  style={{display: "none"}}
                   key={itemId}
-                  className="flex flex-col justify-start items-start text-gray-500 text-sm"
+                  className="hidden flex flex-col justify-start items-start text-gray-500 text-sm"
                 >
-                  <span className="text-xs font-mono">{timestamp}</span>
+                  {/* <span className="text-xs font-mono">{timestamp}</span>
                   <div
                     className={`whitespace-pre-wrap flex items-center font-mono text-sm text-gray-800 ${
                       data ? "cursor-pointer" : ""
@@ -138,7 +155,7 @@ function Transcript({
                         {JSON.stringify(data, null, 2)}
                       </pre>
                     </div>
-                  )}
+                  )} */}
                 </div>
               );
             } else {
@@ -175,6 +192,7 @@ function Transcript({
           onClick={onSendMessage}
           disabled={!canSend || !userText.trim()}
           className="bg-gray-900 text-white rounded-full px-2 py-2 disabled:opacity-50"
+          aria-label="Send message"
         >
           <Image src="arrow.svg" alt="Send" width={24} height={24} />
         </button>
