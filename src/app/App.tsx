@@ -672,7 +672,7 @@ function App() {
           </div>
           
           {/* Chat content */}
-          <div className="h-[calc(100%-2.5rem)] overflow-y-auto">
+          <div className="h-[calc(100%-5rem)] overflow-y-auto">
             <Transcript
               userText={userText}
               setUserText={setUserText}
