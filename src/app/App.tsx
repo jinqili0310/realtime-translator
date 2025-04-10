@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
+import { debounce } from "lodash";
 
 import Image from "next/image";
 
@@ -25,6 +26,7 @@ import { createRealtimeConnection } from "./lib/realtimeConnection";
 
 // Agent configs
 import { allAgentSets, defaultAgentSetKey } from "@/app/agentConfigs";
+import { detectLanguage } from './utils/languageDetection';
 
 function App() {
   const { transcriptItems, addTranscriptMessage, addTranscriptBreadcrumb } =
@@ -86,42 +88,34 @@ function App() {
 
   // Add translateAndSpeak function
   const translateAndSpeak = useCallback(async (text: string, sourceLang: string, targetLang: string) => {
-    try {
-      // Only translate if source and target languages are different
-      if (sourceLang === targetLang) {
-        console.log(`Skipping translation: same language (${sourceLang})`);
-        return null;
-      }
+    if (!text || text === "[inaudible]" || text === "[Transcribing...]") {
+      return null;
+    }
 
-      // Call the translation API
-      const response = await fetch('/api/chat/completions', {
-        method: 'POST',
+    try {
+      const response = await fetch("/api/translate", {
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "gpt-4-turbo-preview",
-          messages: [
-            {
-              role: "system",
-              content: `You are a translation system. Translate the following text from ${sourceLang} to ${targetLang}. Only output the translated text, no explanations or additional text.`
-            },
-            {
-              role: "user",
-              content: text
-            }
-          ]
-        })
+          text,
+          source_language: sourceLang,
+          target_language: targetLang,
+          model: "gpt-3.5-turbo", // Use faster model
+          temperature: 0.3, // Lower temperature for more consistent translations
+          max_tokens: 150, // Limit response length for faster processing
+        }),
       });
 
       if (!response.ok) {
-        throw new Error('Translation failed');
+        throw new Error(`Translation failed: ${response.statusText}`);
       }
 
       const data = await response.json();
-      return data.choices[0].message.content.trim();
+      return data.translated_text;
     } catch (error) {
-      console.error('Error in translateAndSpeak:', error);
+      console.error("Error in translation:", error);
       return null;
     }
   }, []);
@@ -458,48 +452,67 @@ function App() {
     localStorage.setItem("logsExpanded", isEventsPaneExpanded.toString());
   }, [isEventsPaneExpanded]);
 
-  // Add function to detect language
-  const detectLanguage = (text: string): {code: string, name: string} | null => {
-    if (!text || text === "[inaudible]" || text === "[Transcribing...]") return null;
-    
-    // Simple language detection based on character sets
-    // Chinese characters typically fall in this Unicode range
-    const chinesePattern = /[\u4e00-\u9fff]/;
-    // Japanese characters typically include these ranges
-    const japanesePattern = /[\u3040-\u309f\u30a0-\u30ff]/;
-    // Korean characters
-    const koreanPattern = /[\uac00-\ud7af]/;
-    // Arabic characters
-    const arabicPattern = /[\u0600-\u06ff]/;
-    // Russian characters
-    const russianPattern = /[\u0400-\u04ff]/;
-    // Spanish/Portuguese special characters
-    const spanishPattern = /[áéíóúüñ¿¡]/i;
-    // German special characters
-    const germanPattern = /[äöüßÄÖÜ]/;
-    // French special characters
-    const frenchPattern = /[àâçéèêëîïôùûüÿœæ]/i;
+  // Add cache for language detection results
+  const languageCache = new Map<string, {code: string, name: string} | null>();
 
-    if (chinesePattern.test(text)) {
-      return { code: "zh", name: "Chinese" };
-    } else if (japanesePattern.test(text)) {
-      return { code: "ja", name: "Japanese" };
-    } else if (koreanPattern.test(text)) {
-      return { code: "ko", name: "Korean" };
-    } else if (arabicPattern.test(text)) {
-      return { code: "ar", name: "Arabic" };
-    } else if (russianPattern.test(text)) {
-      return { code: "ru", name: "Russian" };
-    } else if (spanishPattern.test(text)) {
-      return { code: "es", name: "Spanish" };
-    } else if (germanPattern.test(text)) {
-      return { code: "de", name: "German" };
-    } else if (frenchPattern.test(text)) {
-      return { code: "fr", name: "French" };
-    } else {
-      // Default to English for Latin script (this is very simplified)
-      return { code: "en", name: "English" };
+  // Add function to detect language
+  const handleLanguageDetection = (text: string, speakerId: string) => {
+    console.log('handleLanguageDetection called with:', { text, speakerId });
+    const detectedLanguage = detectLanguage(text);
+    if (!detectedLanguage) {
+      console.log('No language detected, skipping translation');
+      return null;
     }
+
+    const existingSpeaker = speakerLanguages.find(s => s.speakerId === speakerId);
+    
+    if (!existingSpeaker) {
+      console.log('New speaker detected, adding to speakerLanguages');
+      // New speaker detected
+      setSpeakerLanguages(prev => [...prev, {
+        speakerId,
+        language: detectedLanguage,
+        timestamp: Date.now()
+      }]);
+      
+      // Update active languages if we have at least one other speaker with a different language
+      if (speakerLanguages.length > 0) {
+        const mostRecentSpeaker = [...speakerLanguages].sort((a, b) => b.timestamp - a.timestamp)[0];
+        if (mostRecentSpeaker.language.code !== detectedLanguage.code) {
+          console.log('Updating active languages due to new speaker with different language');
+          setActiveLanguages([detectedLanguage, mostRecentSpeaker.language]);
+          setLanguagesJustDetected(true);
+          setTimeout(() => setLanguagesJustDetected(false), 1000);
+        }
+      }
+    } else if (existingSpeaker.language.code !== detectedLanguage.code) {
+      console.log('Speaker language changed, updating speakerLanguages');
+      // Update speaker's language if it changed
+      setSpeakerLanguages(prev => prev.map(s => 
+        s.speakerId === speakerId 
+          ? {...s, language: detectedLanguage, timestamp: Date.now()}
+          : s
+      ));
+      
+      // Update active languages if this speaker is one of the active ones and the language is different
+      setActiveLanguages(prev => {
+        if (prev.some(lang => lang.code === existingSpeaker.language.code)) {
+          const newLanguages = prev.map(lang => 
+            lang.code === existingSpeaker.language.code ? detectedLanguage : lang
+          );
+          // Only update if the languages are different
+          if (newLanguages[0].code !== newLanguages[1].code) {
+            console.log('Updating active languages due to speaker language change');
+            setLanguagesJustDetected(true);
+            setTimeout(() => setLanguagesJustDetected(false), 1000);
+            return newLanguages;
+          }
+        }
+        return prev;
+      });
+    }
+
+    return detectedLanguage;
   };
 
   // Helper function to check if text is a translation message
@@ -522,166 +535,6 @@ function App() {
       setTimeout(() => setLanguagesJustDetected(false), 1000);
     }
   }, [lockedLanguagePair]);
-
-  // Update speaker sequence and languages when new messages are detected
-  useEffect(() => {
-    // Only proceed if we have transcript items to analyze
-    if (transcriptItems.length < 1) return;
-
-    // Filter to get valid original message items from USERS only (no assistant messages, no translations)
-    const messageItems = transcriptItems.filter(item => 
-      item.type === "MESSAGE" && 
-      item.role === "user" &&  // Only process user messages, not assistant
-      item.title && 
-      item.title !== "[Transcribing...]" &&
-      item.title !== "[inaudible]" &&
-      !item.itemId.startsWith("translation-") &&
-      item.title && !isTranslationMessage(item.title)
-    );
-
-    // Process messages in chronological order
-    const chronologicalMessages = [...messageItems].sort((a, b) => a.createdAtMs - b.createdAtMs);
-    
-    // Track new speakers and their languages
-    const newSpeakerLanguages = [...speakerLanguages];
-    let languagesChanged = false;
-    
-    // Process each message to identify speakers
-    for (const message of chronologicalMessages) {
-      if (message.role && message.title) {
-        const detectedLang = detectLanguage(message.title);
-        if (!detectedLang) continue;
-        
-        // Create unique speaker ID (could be enhanced in a real app with actual user IDs)
-        const speakerId = `${message.role}-${message.itemId.split('-')[0]}`;
-        
-        // Check if this speaker already exists
-        const existingIndex = newSpeakerLanguages.findIndex(s => s.speakerId === speakerId);
-        
-        if (existingIndex === -1) {
-          // New speaker detected - add to sequence
-          newSpeakerLanguages.push({
-            speakerId,
-            language: detectedLang,
-            timestamp: message.createdAtMs
-          });
-          languagesChanged = true;
-          console.log(`New speaker detected: ${speakerId} speaking ${detectedLang.name}`);
-        } else {
-          // Update existing speaker's timestamp
-          newSpeakerLanguages[existingIndex].timestamp = message.createdAtMs;
-        }
-      }
-    }
-    
-    // If the speaker sequence changed, update state and language settings
-    if (languagesChanged) {
-      setSpeakerLanguages(newSpeakerLanguages);
-      
-      // Sort speakers by most recent timestamp
-      const sortedSpeakers = [...newSpeakerLanguages].sort((a, b) => b.timestamp - a.timestamp);
-      
-      // Get the two most recent speakers
-      if (sortedSpeakers.length >= 2) {
-        const [mostRecent, secondMostRecent] = sortedSpeakers;
-        
-        // Only update active languages if they are different
-        if (mostRecent.language.code !== secondMostRecent.language.code) {
-          setActiveLanguages([mostRecent.language, secondMostRecent.language]);
-          setLanguagesJustDetected(true);
-          setTimeout(() => setLanguagesJustDetected(false), 1000);
-        }
-      }
-    }
-  }, [transcriptItems, speakerLanguages]);
-
-  // Update the language detection handler
-  const handleLanguageDetection = (text: string, speakerId: string) => {
-    const detectedLanguage = detectLanguage(text);
-    if (!detectedLanguage) return null;
-
-    const existingSpeaker = speakerLanguages.find(s => s.speakerId === speakerId);
-    
-    if (!existingSpeaker) {
-      // New speaker detected
-      setSpeakerLanguages(prev => [...prev, {
-        speakerId,
-        language: detectedLanguage,
-        timestamp: Date.now()
-      }]);
-      
-      // Update active languages if we have at least one other speaker with a different language
-      if (speakerLanguages.length > 0) {
-        const mostRecentSpeaker = [...speakerLanguages].sort((a, b) => b.timestamp - a.timestamp)[0];
-        if (mostRecentSpeaker.language.code !== detectedLanguage.code) {
-          setActiveLanguages([detectedLanguage, mostRecentSpeaker.language]);
-          setLanguagesJustDetected(true);
-          setTimeout(() => setLanguagesJustDetected(false), 1000);
-        }
-      }
-    } else if (existingSpeaker.language.code !== detectedLanguage.code) {
-      // Update speaker's language if it changed
-      setSpeakerLanguages(prev => prev.map(s => 
-        s.speakerId === speakerId 
-          ? {...s, language: detectedLanguage, timestamp: Date.now()}
-          : s
-      ));
-      
-      // Update active languages if this speaker is one of the active ones and the language is different
-      setActiveLanguages(prev => {
-        if (prev.some(lang => lang.code === existingSpeaker.language.code)) {
-          const newLanguages = prev.map(lang => 
-            lang.code === existingSpeaker.language.code ? detectedLanguage : lang
-          );
-          // Only update if the languages are different
-          if (newLanguages[0].code !== newLanguages[1].code) {
-            setLanguagesJustDetected(true);
-            setTimeout(() => setLanguagesJustDetected(false), 1000);
-            return newLanguages;
-          }
-        }
-        return prev;
-      });
-    }
-
-    return detectedLanguage;
-  };
-
-  // Modify the message handling to include translation direction
-  const handleNewMessage = (text: string, role: 'user' | 'assistant') => {
-    if (role === 'user') {
-      // Get the current active speakers to determine if we need a new speaker
-      const activeSpeakers = getActiveSpeakers();
-      let speakerId: string;
-      
-      // Try to find an existing active speaker
-      const existingSpeaker = activeSpeakers.find(([_, info]) => info.isActive);
-      
-      if (existingSpeaker) {
-        speakerId = existingSpeaker[0];
-      } else {
-        // Create a new speaker if none exists
-        speakerId = `user-${Date.now()}`;
-      }
-      
-      const detectedLanguage = handleLanguageDetection(text, speakerId);
-      
-      if (detectedLanguage) {
-        // Get translation direction before adding the message
-        const translationDirection = getTranslationDirection(speakerId);
-        
-        // Add original message to transcript
-        addTranscriptMessage(speakerId, role, text, true);
-        
-        // if (translationDirection && translationDirection.source.code !== translationDirection.target.code) {
-        //   // Add translation message immediately after
-        //   const translationId = `translation-${speakerId}`;
-        //   const translatedText = `[${translationDirection.source.code} → ${translationDirection.target.code}] ${text}`;
-        //   addTranscriptMessage(translationId, 'assistant', translatedText, false);
-        // }
-      }
-    }
-  };
 
   return (
     <div className="flex h-screen bg-white">

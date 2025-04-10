@@ -1,7 +1,6 @@
 import { AgentConfig } from "@/app/types";
 import { injectTransferTools } from "./utils";
 
-// 新的智能翻译代理
 const translator: AgentConfig = {
   name: "smart-translator",
   publicDescription: "A translator that intelligently detects source language and translates it into your primary language, or does the reverse based on context.",

@@ -6,6 +6,7 @@ import { useEvent } from "@/app/contexts/EventContext";
 import { useRef, useState, useCallback } from "react";
 import { useLanguagePair } from "./useLanguagePair";
 import { SpeakerInfo } from "@/app/types";
+import { detectLanguageCode } from '../utils/languageDetection';
 
 interface UseHandleServerEventParams {
   setSessionStatus: (status: SessionStatus) => void;
@@ -108,6 +109,32 @@ export const useHandleServerEvent = ({
 
   const handleServerEventRef = useRef<((event: any) => void) | null>(null);
 
+  // Add cache for language detection results
+  const languageDetectionCache = useRef<Map<string, {code: string, name: string}>>(new Map());
+
+  const detectAndCacheLanguage = useCallback((text: string): {code: string, name: string} | null => {
+    // Skip invalid text
+    if (!text || text === "[inaudible]" || text === "[Transcribing...]") {
+      return null;
+    }
+
+    // Check cache first
+    const cachedResult = languageDetectionCache.current.get(text);
+    if (cachedResult) {
+      return cachedResult;
+    }
+
+    // Detect language if not in cache
+    const detectedLang = detectLanguageCode(text);
+    if (detectedLang) {
+      const result = { code: detectedLang, name: getLanguageName(detectedLang) };
+      languageDetectionCache.current.set(text, result);
+      return result;
+    }
+
+    return null;
+  }, []);
+
   // Helper function to check if text is already a translation
   const isTranslationMessage = (text: string) => {
     if (!text) return false;
@@ -134,156 +161,87 @@ export const useHandleServerEvent = ({
 
     // For translation functions, modify the target language to match our UI settings
     if (functionCallParams.name === "translate_text") {
-      // Get the current main and target languages from our UI state
-      const sourceCode = activeLanguages[0].code;
-      const targetCode = activeLanguages[1].code;
+      console.log('Translation function called with args:', args);
+      console.log('Current locked language pair:', lockedLanguagePair);
+      console.log('Active speakers:', activeSpeakers);
       
-      // Override the function arguments with our UI languages
-      if (args.source_language && args.target_language) {
-        // If the source language matches our main language, translate to target
-        if (args.source_language === sourceCode) {
-          args.target_language = targetCode;
+      // Get the translation direction from useLanguagePair
+      const direction = getTranslationDirection(args.speaker_id);
+      
+      if (direction) {
+        console.log(`Translation direction: ${direction.source.code} → ${direction.target.code}`);
+
+        // Process the function call with the updated direction
+        if (currentAgent?.toolLogic?.[functionCallParams.name]) {
+          const fn = currentAgent.toolLogic[functionCallParams.name];
+          // Create a new object with the correct direction, preserving other args
+          const translationArgs = {
+            ...args,
+            source_language: direction.source.code,
+            target_language: direction.target.code
+          };
+          
+          console.log('Calling translation with args:', translationArgs);
+          
+          const fnResult = await fn(translationArgs, transcriptItems);
+          addTranscriptBreadcrumb(
+            `function call result: ${functionCallParams.name}`,
+            fnResult
+          );
+
+          // Send the result to acknowledge completion of the function
+          sendClientEvent({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: functionCallParams.call_id,
+              output: JSON.stringify(fnResult),
+            },
+          });
         }
-        // If the source language matches our target language, translate to main
-        else if (args.source_language === targetCode) {
-          args.target_language = sourceCode;
-        }
-        // If the source is neither main nor target, translate to target by default
-        else {
-          args.target_language = targetCode;
-        }
-        
-        console.log(`Translation direction: ${args.source_language} → ${args.target_language}`);
+      } else {
+        console.log('No translation direction available. Details:');
+        console.log('- Speaker ID:', args.speaker_id);
+        console.log('- Locked language pair:', lockedLanguagePair);
+        console.log('- Active speakers:', activeSpeakers);
+        return;
       }
-      
-      // Process and acknowledge the function call with modified args
-      let fnResult = { result: true };
-      
-      if (currentAgent?.toolLogic?.[functionCallParams.name]) {
-        const fn = currentAgent.toolLogic[functionCallParams.name];
-        fnResult = await fn(args, transcriptItems);
-      }
-      
-      addTranscriptBreadcrumb(
-        `function call result: ${functionCallParams.name}`,
-        fnResult
-      );
-
-      // Send the result to acknowledge completion of the function
-      sendClientEvent({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: functionCallParams.call_id,
-          output: JSON.stringify(fnResult),
-        },
-      });
-      
-      // Always continue the conversation flow
-      sendClientEvent({ type: "response.create" });
-      return;
-    } else if (functionCallParams.name === "detect_language") {
-      // Handle language detection normally
-      let fnResult = { result: true };
-      
-      if (currentAgent?.toolLogic?.[functionCallParams.name]) {
-        const fn = currentAgent.toolLogic[functionCallParams.name];
-        fnResult = await fn(args, transcriptItems);
-      }
-      
-      addTranscriptBreadcrumb(
-        `function call result: ${functionCallParams.name}`,
-        fnResult
-      );
-
-      // Send the result to acknowledge completion of the function
-      sendClientEvent({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: functionCallParams.call_id,
-          output: JSON.stringify(fnResult),
-        },
-      });
-      
-      // Always continue the conversation flow
-      sendClientEvent({ type: "response.create" });
-      return;
-    }
-
-    // Handle other function calls as before
-    if (currentAgent?.toolLogic?.[functionCallParams.name]) {
-      const fn = currentAgent.toolLogic[functionCallParams.name];
-      const fnResult = await fn(args, transcriptItems);
-      addTranscriptBreadcrumb(
-        `function call result: ${functionCallParams.name}`,
-        fnResult
-      );
-
-      sendClientEvent({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: functionCallParams.call_id,
-          output: JSON.stringify(fnResult),
-        },
-      });
-      sendClientEvent({ type: "response.create" });
-    } else if (functionCallParams.name === "transferAgents") {
-      const destinationAgent = args.destination_agent;
-      const newAgentConfig =
-        selectedAgentConfigSet?.find((a) => a.name === destinationAgent) || null;
-      if (newAgentConfig) {
-        setSelectedAgentName(destinationAgent);
-      }
-      const functionCallOutput = {
-        destination_agent: destinationAgent,
-        did_transfer: !!newAgentConfig,
-      };
-      sendClientEvent({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: functionCallParams.call_id,
-          output: JSON.stringify(functionCallOutput),
-        },
-      });
-      addTranscriptBreadcrumb(
-        `function call: ${functionCallParams.name} response`,
-        functionCallOutput
-      );
-      sendClientEvent({ type: "response.create" });
     } else {
-      const simulatedResult = { result: true };
-      addTranscriptBreadcrumb(
-        `function call fallback: ${functionCallParams.name}`,
-        simulatedResult
-      );
+      // Handle other function calls as before
+      if (currentAgent?.toolLogic?.[functionCallParams.name]) {
+        const fn = currentAgent.toolLogic[functionCallParams.name];
+        const fnResult = await fn(args, transcriptItems);
+        addTranscriptBreadcrumb(
+          `function call result: ${functionCallParams.name}`,
+          fnResult
+        );
 
-      // Always send the function call output
-      sendClientEvent({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: functionCallParams.call_id,
-          output: JSON.stringify(simulatedResult),
-        },
-      });
-      
-      // Only trigger additional response for non-translation functions
-      if (!isTranslationMessage(functionCallParams.name) || !languagesDetected) {
-        sendClientEvent({ type: "response.create" });
-      } else if (functionCallParams.name === "detect_language" && languagesDetected) {
-        // Ensure that after language detection, translation happens
-        sendClientEvent({ type: "response.create" });
+        sendClientEvent({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: functionCallParams.call_id,
+            output: JSON.stringify(fnResult),
+          },
+        });
       }
     }
+
+    // Always continue the conversation flow
+    sendClientEvent({ type: "response.create" });
   };
 
   const handleAudioTranscriptionComplete = useCallback(async (event: AudioTranscriptionCompleteEvent) => {
     const { transcription, speakerId } = event;
     
-    // Get translation direction based on locked language pair
+    // Detect and cache language
+    const detectedLanguage = detectAndCacheLanguage(transcription);
+    if (!detectedLanguage) {
+      console.log('Could not detect language for:', transcription);
+      return;
+    }
+
+    // Get translation direction based on detected language
     const direction = getTranslationDirection(speakerId);
     if (!direction) {
       console.log('No translation direction available');
@@ -329,7 +287,7 @@ export const useHandleServerEvent = ({
     } catch (error) {
       console.error('Error in translation:', error);
     }
-  }, [getTranslationDirection, translateAndSpeak, addMessage, isTranslationMessage]);
+  }, [getTranslationDirection, translateAndSpeak, addMessage, isTranslationMessage, detectAndCacheLanguage]);
 
   const handleResponseDone = useCallback(async (event: ResponseDoneEvent) => {
     const { response, speakerId } = event;
@@ -455,17 +413,12 @@ export const useHandleServerEvent = ({
               !isTranslationMessage(finalTranscript)) {
             
             // Detect the language of this specific message
-            const detectedLang = detectLanguageSimple(finalTranscript);
+            const detectedLanguage = detectAndCacheLanguage(finalTranscript);
             
-            if (detectedLang) {
-              // Check if this language is already in the locked pair
-              const isLanguageInLockedPair = lockedLanguagePair && 
-                (lockedLanguagePair.source.code === detectedLang || 
-                 lockedLanguagePair.target.code === detectedLang);
-
+            if (detectedLanguage) {
               // Find existing speaker with this language
               const existingSpeakerWithLanguage = activeSpeakers.find(s => 
-                s.language.code === detectedLang
+                s.language.code === detectedLanguage.code
               );
               
               let speakerId = itemId;
@@ -473,23 +426,23 @@ export const useHandleServerEvent = ({
                 // If we found a speaker with the same language, just update their activity
                 speakerId = existingSpeakerWithLanguage.speakerId;
                 updateSpeakerActivity(speakerId, true);
-                console.log(`Speaker activity updated for language: ${detectedLang}`);
-              } else if (!isLanguageInLockedPair) {
-                // Only create a new speaker if this is a new language not in the locked pair
-                handleNewSpeaker(speakerId, { 
-                  code: detectedLang, 
-                  name: getLanguageName(detectedLang) 
-                });
-                console.log(`New language detected: ${detectedLang}`);
+                console.log(`Speaker activity updated for language: ${detectedLanguage.code}`);
+              } else {
+                // Create a new speaker for this language
+                handleNewSpeaker(speakerId, detectedLanguage);
+                console.log(`New language detected: ${detectedLanguage.code}`);
               }
 
-              // Only attempt translation if we have a valid language pair and different languages
-              if (lockedLanguagePair && 
-                  lockedLanguagePair.source.code !== lockedLanguagePair.target.code) {
-                handleAudioTranscriptionComplete({
-                  transcription: finalTranscript,
-                  speakerId
-                });
+              // Get translation direction and handle translation
+              const direction = getTranslationDirection(speakerId);
+              if (direction && direction.source.code !== direction.target.code) {
+                // Use setTimeout to ensure state updates are processed
+                setTimeout(() => {
+                  handleAudioTranscriptionComplete({
+                    transcription: finalTranscript,
+                    speakerId
+                  });
+                }, 0);
               }
             }
           }
@@ -544,13 +497,6 @@ export const useHandleServerEvent = ({
           
           if (assistantMessages.length > 0) {
             const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
-            // if (lastAssistantMessage.title) {
-            //   // Get the current active speakers
-            //   // The assistant always responds in the target language, so we translate to main
-            //   setTimeout(() => {
-            //     translateAndSpeak(lastAssistantMessage.title || "", activeLanguages[1].code, activeLanguages[0].code, "assistant");
-            //   }, 500);
-            // }
           }
         }
 
@@ -562,10 +508,21 @@ export const useHandleServerEvent = ({
               outputItem.name &&
               outputItem.arguments
             ) {
+              // Get the most recent active speaker
+              const mostRecentSpeaker = activeSpeakers
+                .filter(s => s.isActive)
+                .sort((a, b) => b.timestamp - a.timestamp)[0];
+
+              // Parse the arguments and add the speaker ID
+              const args = JSON.parse(outputItem.arguments);
+              if (mostRecentSpeaker) {
+                args.speaker_id = mostRecentSpeaker.speakerId;
+              }
+
               handleFunctionCall({
                 name: outputItem.name,
                 call_id: outputItem.call_id,
-                arguments: outputItem.arguments,
+                arguments: JSON.stringify(args),
               });
             }
           });
@@ -589,33 +546,6 @@ export const useHandleServerEvent = ({
   handleServerEventRef.current = handleServerEvent;
 
   return handleServerEventRef;
-};
-
-// Add a simple language detection function
-const detectLanguageSimple = (text: string): string | null => {
-  if (!text) return null;
-  
-  // Simple language detection based on character sets (same logic as in App.tsx)
-  const chinesePattern = /[\u4e00-\u9fff]/;
-  const japanesePattern = /[\u3040-\u309f\u30a0-\u30ff]/;
-  const koreanPattern = /[\uac00-\ud7af]/;
-  const arabicPattern = /[\u0600-\u06ff]/;
-  const russianPattern = /[\u0400-\u04ff]/;
-  const spanishPattern = /[áéíóúüñ¿¡]/i;
-  const germanPattern = /[äöüßÄÖÜ]/;
-  const frenchPattern = /[àâçéèêëîïôùûüÿœæ]/i;
-
-  if (chinesePattern.test(text)) return "zh";
-  if (japanesePattern.test(text)) return "ja";
-  if (koreanPattern.test(text)) return "ko";
-  if (arabicPattern.test(text)) return "ar";
-  if (russianPattern.test(text)) return "ru";
-  if (spanishPattern.test(text)) return "es";
-  if (germanPattern.test(text)) return "de";
-  if (frenchPattern.test(text)) return "fr";
-  
-  // Default to English for Latin script
-  return "en";
 };
 
 // Helper function to get language name from code

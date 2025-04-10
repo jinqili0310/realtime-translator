@@ -114,6 +114,13 @@ export interface Language {
   name: string;
 }
 
+export interface Speaker {
+  speakerId: string;
+  language: Language;
+  timestamp: number;
+  isActive: boolean;
+}
+
 export interface SpeakerInfo {
   speakerId: string;
   name?: string;
@@ -126,9 +133,8 @@ export interface SpeakerInfo {
 }
 
 export interface LockedLanguagePair {
-  main: Language;
+  source: Language;
   target: Language;
-  speakerIds: string[];
 }
 
 export interface SpeakerEvent {
