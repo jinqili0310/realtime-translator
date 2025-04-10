@@ -248,21 +248,66 @@ function App() {
 
   const disconnectFromRealtime = () => {
     if (pcRef.current) {
+      // Stop all tracks
       pcRef.current.getSenders().forEach((sender) => {
         if (sender.track) {
           sender.track.stop();
         }
       });
 
+      // Close the peer connection
       pcRef.current.close();
       pcRef.current = null;
     }
+
+    // Clean up audio element
+    if (audioElementRef.current) {
+      audioElementRef.current.pause();
+      audioElementRef.current.srcObject = null;
+    }
+
     setDataChannel(null);
     setSessionStatus("DISCONNECTED");
     setIsPTTUserSpeaking(false);
 
     logClientEvent({}, "disconnected");
   };
+
+  // Add effect to handle audio element cleanup
+  useEffect(() => {
+    return () => {
+      if (audioElementRef.current) {
+        audioElementRef.current.pause();
+        audioElementRef.current.srcObject = null;
+      }
+    };
+  }, []);
+
+  // Add effect to handle audio autoplay
+  useEffect(() => {
+    if (audioElementRef.current) {
+      const playAudio = async () => {
+        try {
+          await audioElementRef.current?.play();
+        } catch (err) {
+          console.warn("Autoplay may be blocked by browser:", err);
+          // Try to play again when user interacts with the page
+          const handleUserInteraction = async () => {
+            try {
+              await audioElementRef.current?.play();
+              document.removeEventListener('click', handleUserInteraction);
+              document.removeEventListener('keydown', handleUserInteraction);
+            } catch (e) {
+              console.warn("Failed to play audio after user interaction:", e);
+            }
+          };
+          document.addEventListener('click', handleUserInteraction);
+          document.addEventListener('keydown', handleUserInteraction);
+        }
+      };
+      playAudio();
+    }
+  }, [audioElementRef.current]);
 
   const sendSimulatedUserMessage = (text: string) => {
     const id = uuidv4().slice(0, 32);
@@ -412,14 +457,6 @@ function App() {
   useEffect(() => {
     localStorage.setItem("logsExpanded", isEventsPaneExpanded.toString());
   }, [isEventsPaneExpanded]);
-
-  useEffect(() => {
-    if (audioElementRef.current) {
-      audioElementRef.current.play().catch((err) => {
-        console.warn("Autoplay may be blocked by browser:", err);
-      });
-    }
-  }, []);
 
   // Add function to detect language
   const detectLanguage = (text: string): {code: string, name: string} | null => {
