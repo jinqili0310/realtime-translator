@@ -22,6 +22,7 @@ export default function Transcript({
   const { transcriptItems } = useTranscript();
   const { getSpeakerById } = useSpeaker();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const hasTranslatingMessage = useRef(false);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -35,33 +36,72 @@ export default function Transcript({
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {transcriptItems.map((item) => {
-          const speaker = getSpeakerById(item.speakerId);
+          const speaker = getSpeakerById(item.speakerId || "");
           const isUser = item.role === "user";
           const isTranslation = item.itemId.startsWith("translation-");
+          const isAssistant = item.role === "assistant" && !isTranslation;
 
-          return (
-            <div
-              key={item.itemId}
-              className={`flex ${isUser ? "justify-end" : "justify-start"}`}
-            >
-              <div
-                className={`max-w-[80%] rounded-lg p-3 ${
-                  isUser
-                    ? "bg-blue-500 text-white"
-                    : isTranslation
-                    ? "bg-gray-100 text-gray-800"
-                    : "bg-gray-200 text-gray-800"
-                }`}
-              >
-                {!isMinimal && speaker && (
-                  <div className="text-xs font-semibold mb-1">
-                    {speaker.name || `Speaker ${item.speakerId}`}
+          if (item.type === "BREADCRUMB" && !item.title.startsWith("session.id")) {
+            if (item.title.startsWith("Agent")) {
+              return (
+                <div key={item.itemId} className="flex justify-start">
+                  <div className="max-w-[80%] rounded-lg p-3 bg-gray-200 text-gray-800">
+                    <div className="text-sm">
+                      {item.title}
+                    </div>
                   </div>
-                )}
-                <div className="text-sm">{item.title}</div>
+                </div>
+              );
+            }
+            // Only show "Translating..." if there's no subsequent message and no other translating message
+            const hasSubsequentMessage = transcriptItems.some(
+              (nextItem) =>
+                nextItem.createdAtMs > item.createdAtMs &&
+                nextItem.type === "MESSAGE"
+            );
+
+            if (!hasSubsequentMessage && !hasTranslatingMessage.current) {
+              hasTranslatingMessage.current = true;
+              return (
+                <div key={item.itemId} className="flex justify-start">
+                  <div className="max-w-[80%] rounded-lg p-3 bg-gray-200 text-gray-800">
+                    <div className="text-sm italic">
+                      Translating...
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+            return null;
+          }
+
+          if (item.type === "MESSAGE" && (item.role === "user" || item.status === "DONE")) {
+            // Reset the translating message flag when a new message arrives
+            hasTranslatingMessage.current = false;
+            return (
+              <div
+                key={item.itemId}
+                className={`flex ${isUser ? "justify-end" : "justify-start"}`}
+              >
+                <div
+                  className={`max-w-[80%] rounded-lg p-3 ${isUser
+                    ? "bg-blue-500 text-white"
+                    : "bg-gray-200 text-gray-800"
+                    }`}
+                >
+                  {!isMinimal && speaker && (
+                    <div className="text-xs font-semibold mb-1">
+                      {isAssistant ? "Assistant" : speaker.name || `Speaker ${item.speakerId}`}
+                    </div>
+                  )}
+                  <div className={`text-sm ${item.title === "[Transcribing...]" ? "italic" : ""}`}>
+                    {item.title === "[Transcribing...]" ? "Transcribing..." : item.title}
+                  </div>
+                </div>
               </div>
-            </div>
-          );
+            );
+          }
+          return null;
         })}
         <div ref={messagesEndRef} />
       </div>

@@ -347,7 +347,7 @@ function App() {
     );
   };
 
-  const handleSendTextMessage = () => {
+  const handleSendMessage = () => {
     if (!userText.trim()) return;
     cancelAssistantSpeech();
 
@@ -647,49 +647,93 @@ function App() {
   };
 
   return (
-    <div className="flex h-screen bg-gray-100">
+    <div className="flex h-screen bg-white">
       {/* Left side - iPhone-style chat interface */}
-      <div className="w-1/2 flex flex-col items-center justify-center p-4">
-        <div className="w-full max-w-md bg-white rounded-3xl shadow-lg overflow-hidden" style={{ height: '80vh' }}>
+      <div className="md:w-1/2 w-full flex flex-col items-center justify-center p-4">
+        <div className="hidden md:block w-[375px] h-[812px] bg-white rounded-[3.5rem] shadow-2xl overflow-hidden border-8 border-black">
           {/* iPhone notch */}
-          <div className="h-6 bg-black rounded-t-3xl flex items-center justify-center">
-            <div className="w-24 h-4 bg-black rounded-full"></div>
+          <div className="h-10 bg-black rounded-t-[2.5rem] flex items-center justify-center relative">
+            <div className="w-40 h-6 bg-black rounded-b-3xl"></div>
+            <div className="absolute top-3 right-6 w-3 h-3 bg-gray-800 rounded-full"></div>
+            
+            {/* Status bar */}
+            <div className="absolute top-2 left-0 right-0 flex justify-between items-center px-4 text-white text-xs">
+              <div className="flex items-center space-x-1">
+                <span>9:41</span>
+              </div>
+              <div className="flex items-center space-x-1">
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M2 12C2 6.48 6.48 2 12 2C17.52 2 22 6.48 22 12C22 17.52 17.52 22 12 22C6.48 22 2 17.52 2 12Z" stroke="currentColor" strokeWidth="2"/>
+                  <path d="M12 6V12L16 14" stroke="currentColor" strokeWidth="2"/>
+                </svg>
+                <span>100%</span>
+              </div>
+            </div>
           </div>
           
           {/* Chat content */}
-          <div className="flex-1 overflow-y-auto p-4">
+          <div className="h-[calc(100%-2.5rem)] overflow-y-auto">
             <Transcript
               userText={userText}
               setUserText={setUserText}
-              onSendMessage={handleSendTextMessage}
+              onSendMessage={handleSendMessage}
               canSend={sessionStatus === "CONNECTED" && dcRef.current?.readyState === "open"}
               isMinimal={true}
             />
           </div>
         </div>
+
+        {/* Mobile view */}
+        <div className="md:hidden w-full h-full bg-white flex flex-col">
+          <div className="flex-1 overflow-y-auto w-full">
+            <Transcript
+              userText={userText}
+              setUserText={setUserText}
+              onSendMessage={handleSendMessage}
+              canSend={sessionStatus === "CONNECTED" && dcRef.current?.readyState === "open"}
+              isMinimal={true}
+            />
+          </div>
+          <div className="w-full p-4 border-t border-gray-200">
+            <button
+              onClick={handleToggleRecording}
+              className={`w-full py-3 px-4 rounded-lg transition-all duration-300 ${
+                isPTTUserSpeaking ? 'bg-red-500 text-white' : 'bg-gray-200 text-gray-800'
+              }`}
+              disabled={sessionStatus !== "CONNECTED" || dataChannel?.readyState !== "open"}
+            >
+              {isPTTUserSpeaking ? 'Stop Recording' : 'Start Recording'}
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* Right side - Mic toggle */}
-      <div className="w-1/2 flex items-center justify-center">
-        <button
+      {/* Right side - Mic toggle (desktop only) */}
+      <div className="hidden md:flex w-1/2 items-center justify-center">
+        <div
           onClick={handleToggleRecording}
-          className={`p-4 rounded-full transition-all duration-300 ${
-            isPTTUserSpeaking ? 'bg-red-500' : 'bg-gray-200'
+          className={`cursor-pointer transition-transform duration-300 ${
+            isPTTUserSpeaking ? 'scale-110' : ''
           }`}
-          disabled={sessionStatus !== "CONNECTED" || dataChannel?.readyState !== "open"}
+          style={{ pointerEvents: sessionStatus !== "CONNECTED" || dataChannel?.readyState !== "open" ? 'none' : 'auto' }}
           aria-label={isPTTUserSpeaking ? "Stop recording" : "Start recording"}
           title={isPTTUserSpeaking ? "Stop recording" : "Start recording"}
         >
           <Image
             src="/mic01.png"
             alt={isPTTUserSpeaking ? "Recording in progress" : "Microphone"}
-            width={64}
-            height={64}
-            className={`transition-transform duration-300 ${
-              isPTTUserSpeaking ? 'scale-110' : ''
+            width={96}
+            height={96}
+            className={`transition-opacity duration-300 ${
+              sessionStatus !== "CONNECTED" || dataChannel?.readyState !== "open" ? 'opacity-50' : ''
             }`}
           />
-        </button>
+        </div>
+      </div>
+
+      {/* Hidden debug panel */}
+      <div className="hidden">
+        <Events isExpanded={false} />
       </div>
     </div>
   );
