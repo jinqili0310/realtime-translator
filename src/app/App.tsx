@@ -647,55 +647,50 @@ function App() {
   };
 
   return (
-    <div className="text-base flex flex-col h-screen bg-gray-100 text-gray-800 relative">
-      <div className="p-5 text-lg font-semibold flex justify-between items-center bg-white border-b border-gray-200">
-        <div className="flex items-center">
-          <div onClick={() => window.location.reload()} style={{ cursor: 'pointer' }}>
-            <Image
-              src="/openai-logomark.svg"
-              alt="OpenAI Logo"
-              width={20}
-              height={20}
-              className="mr-2"
+    <div className="flex h-screen bg-gray-100">
+      {/* Left side - iPhone-style chat interface */}
+      <div className="w-1/2 flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-3xl shadow-lg overflow-hidden" style={{ height: '80vh' }}>
+          {/* iPhone notch */}
+          <div className="h-6 bg-black rounded-t-3xl flex items-center justify-center">
+            <div className="w-24 h-4 bg-black rounded-full"></div>
+          </div>
+          
+          {/* Chat content */}
+          <div className="flex-1 overflow-y-auto p-4">
+            <Transcript
+              userText={userText}
+              setUserText={setUserText}
+              onSendMessage={handleSendTextMessage}
+              canSend={sessionStatus === "CONNECTED" && dcRef.current?.readyState === "open"}
+              isMinimal={true}
             />
           </div>
-          <div>
-            Realtime Translator
-          </div>
-        </div>
-        <div className="flex items-center gap-4 text-sm text-gray-600">
-          {activeLanguages.length >= 2 && (
-            <div className={`flex items-center space-x-2 transition-all duration-500 ${languagesJustDetected ? 'scale-110' : ''}`}>
-              <span className="text-lg font-semibold">{activeLanguages[0].name}</span>
-              <span className="text-lg">↔</span>
-              <span className="text-lg font-semibold">{activeLanguages[1].name}</span>
-            </div>
-          )}
         </div>
       </div>
 
-      <div className="flex flex-1 gap-2 px-2 overflow-hidden relative">
-        <Transcript
-          userText={userText}
-          setUserText={setUserText}
-          onSendMessage={handleSendTextMessage}
-          canSend={
-            sessionStatus === "CONNECTED" &&
-            dcRef.current?.readyState === "open"
-          }
-        />
-
-        <Events isExpanded={isEventsPaneExpanded} />
+      {/* Right side - Mic toggle */}
+      <div className="w-1/2 flex items-center justify-center">
+        <button
+          onClick={handleToggleRecording}
+          className={`p-4 rounded-full transition-all duration-300 ${
+            isPTTUserSpeaking ? 'bg-red-500' : 'bg-gray-200'
+          }`}
+          disabled={sessionStatus !== "CONNECTED" || dataChannel?.readyState !== "open"}
+          aria-label={isPTTUserSpeaking ? "Stop recording" : "Start recording"}
+          title={isPTTUserSpeaking ? "Stop recording" : "Start recording"}
+        >
+          <Image
+            src="/mic01.png"
+            alt={isPTTUserSpeaking ? "Recording in progress" : "Microphone"}
+            width={64}
+            height={64}
+            className={`transition-transform duration-300 ${
+              isPTTUserSpeaking ? 'scale-110' : ''
+            }`}
+          />
+        </button>
       </div>
-
-      <BottomToolbar
-        sessionStatus={sessionStatus}
-        onToggleConnection={onToggleConnection}
-        isPTTUserSpeaking={isPTTUserSpeaking}
-        onToggleRecording={handleToggleRecording}
-        isEventsPaneExpanded={isEventsPaneExpanded}
-        setIsEventsPaneExpanded={setIsEventsPaneExpanded}
-      />
     </div>
   );
 }

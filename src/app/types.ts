@@ -42,21 +42,16 @@ export type AllAgentConfigsType = Record<string, AgentConfig[]>;
 export interface TranscriptItem {
   itemId: string;
   type: "MESSAGE" | "BREADCRUMB";
-  role?: "user" | "assistant";
-  title?: string;
-  data?: Record<string, any>;
-  expanded: boolean;
-  timestamp: string;
+  role: "user" | "assistant";
+  title: string;
+  data?: any;
+  expanded?: boolean;
+  timestamp?: string;
+  isHidden?: boolean;
+  speakerId?: string;
+  speakerInfo?: SpeakerInfo;
   createdAtMs: number;
-  status: "IN_PROGRESS" | "DONE";
-  isHidden: boolean;
-  speakerInfo?: {
-    speakerId: string;
-    language: {
-      code: string;
-      name: string;
-    };
-  };
+  status?: "IN_PROGRESS" | "DONE";
 }
 
 export interface Log {
@@ -120,9 +115,14 @@ export interface Language {
 }
 
 export interface SpeakerInfo {
-  language: Language | null;
-  isActive: boolean;
-  lastSpoken: number;
+  speakerId: string;
+  name?: string;
+  language: {
+    code: string;
+    name: string;
+  };
+  isActive?: boolean;
+  timestamp?: number;
 }
 
 export interface LockedLanguagePair {
