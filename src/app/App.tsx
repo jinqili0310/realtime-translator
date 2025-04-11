@@ -102,7 +102,7 @@ function App() {
           text,
           source_language: sourceLang,
           target_language: targetLang,
-          model: "gpt-3.5-turbo", // Use faster model
+          model: "gpt-4o-mini-realtime-preview-2024-12-17", // Use faster model
           temperature: 0.3, // Lower temperature for more consistent translations
           max_tokens: 150, // Limit response length for faster processing
         }),

@@ -89,7 +89,7 @@ you are malfunctioning.
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "gpt-4-turbo-preview",
+          model: "whisper-1",
           messages: [
             {
               role: "system",
@@ -117,7 +117,7 @@ you are malfunctioning.
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "gpt-4-turbo-preview",
+          model: "gpt-4o-mini-realtime-preview-2024-12-17",
           messages: [
             {
               role: "system",

@@ -17,7 +17,7 @@ export async function POST(request: Request) {
     }
 
     const completion = await openai.chat.completions.create({
-      model: model || 'gpt-3.5-turbo',
+      model: model || 'gpt-4o-mini-realtime-preview-2024-12-17',
       messages: [
         {
           role: 'system',
