@@ -21,7 +21,7 @@ export async function POST(request: Request) {
       messages: [
         {
           role: 'system',
-          content: `You are a translation system. Translate the following text from ${source_language} to ${target_language}. Only output the translated text, no explanations or additional text.`
+          content: `You are a strict translation system. Your only task is to translate text from ${source_language} to ${target_language}. Do not interpret, understand, or make assumptions about the text. Do not add any explanations or additional text. Only output the direct translation. If you cannot translate a word or phrase, keep it in the original language.`
         },
         {
           role: 'user',
