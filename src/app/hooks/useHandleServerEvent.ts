@@ -6,6 +6,12 @@ import { useEvent } from "@/app/contexts/EventContext";
 import { useRef, useCallback } from "react";
 import { useLanguagePair } from "./useLanguagePair";
 
+// Helper function to log OpenAI models used
+const logOpenAIModel = (functionName: string, modelName: string | undefined) => {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] 🤖 OpenAI MODEL USED: ${modelName || 'default'} - Function: ${functionName}`);
+};
+
 // Declare the window property for recent translations cache
 declare global {
   interface Window {
@@ -161,6 +167,10 @@ export const useHandleServerEvent = ({
     // For translation functions, modify the target language before logging
     if (functionCallParams.name === "translate_text") {
       let args = JSON.parse(functionCallParams.arguments);
+      
+      // Log the model used for translation
+      logOpenAIModel('translate_text', args.model || 'gpt-3.5-turbo');
+      
       let translationArgs = args;
       const originalArgs = {...args}; // Store original args for logging
       
