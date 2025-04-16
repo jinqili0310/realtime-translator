@@ -2,7 +2,6 @@
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { debounce } from "lodash";
 
 import Image from "next/image";
 
@@ -10,6 +9,7 @@ import Image from "next/image";
 import Transcript from "./components/Transcript";
 import Events from "./components/Events";
 import BottomToolbar from "./components/BottomToolbar";
+import LanguageSelectionModal from "./components/LanguageSelectionModal";
 
 // Types
 import { AgentConfig, SessionStatus } from "@/app/types";
@@ -26,7 +26,6 @@ import { createRealtimeConnection } from "./lib/realtimeConnection";
 
 // Agent configs
 import { allAgentSets, defaultAgentSetKey } from "@/app/agentConfigs";
-import { detectLanguage } from './utils/languageDetection';
 
 function App() {
   const { transcriptItems, addTranscriptMessage, addTranscriptBreadcrumb } =
@@ -41,19 +40,25 @@ function App() {
     getSpeakerById,
     getTranslationDirection
   } = useSpeaker();
-  const { lockedLanguagePair } = useLanguagePair();
+  const { 
+    lockedLanguagePair,
+    availableLanguages,
+    shouldShowLanguageModal,
+    setLanguagePair,
+    resetLanguagePair,
+  } = useLanguagePair();
 
   const [selectedAgentName, setSelectedAgentName] = useState<string>("");
   const [selectedAgentConfigSet, setSelectedAgentConfigSet] =
     useState<AgentConfig[] | null>(null);
 
-  // Add state for language information
-  const [activeLanguages, setActiveLanguages] = useState<Array<{code: string, name: string}>>([
-    { code: "zh", name: "Chinese" },
-    { code: "en", name: "English" }
-  ]);
-  const [languagesDetected, setLanguagesDetected] = useState<boolean>(true);
-  const [languagesJustDetected, setLanguagesJustDetected] = useState<boolean>(false);
+  // Compute activeLanguages from locked pair instead of having state
+  const activeLanguages = lockedLanguagePair 
+    ? [lockedLanguagePair.source, lockedLanguagePair.target] 
+    : [];
+  
+  // Set this to false since we don't want automatic detection
+  const [languagesDetected] = useState<boolean>(false);
 
   const [dataChannel, setDataChannel] = useState<RTCDataChannel | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -455,86 +460,85 @@ function App() {
   // Add cache for language detection results
   const languageCache = new Map<string, {code: string, name: string} | null>();
 
-  // Add function to detect language
-  const handleLanguageDetection = (text: string, speakerId: string) => {
-    console.log('handleLanguageDetection called with:', { text, speakerId });
-    const detectedLanguage = detectLanguage(text);
-    if (!detectedLanguage) {
-      console.log('No language detected, skipping translation');
+  // Our App-specific language detection function
+  const appHandleLanguageDetection = (text: string, speakerId: string) => {
+    // Skip detection if we don't have a locked language pair
+    if (!lockedLanguagePair) {
+      console.log("No language pair locked, skipping detection");
+      // Modal should be shown to select languages
       return null;
     }
 
-    const existingSpeaker = speakerLanguages.find(s => s.speakerId === speakerId);
-    
-    if (!existingSpeaker) {
-      console.log('New speaker detected, adding to speakerLanguages');
-      // New speaker detected
-      setSpeakerLanguages(prev => [...prev, {
-        speakerId,
-        language: detectedLanguage,
-        timestamp: Date.now()
-      }]);
+    // Use the pre-selected languages instead of detecting
+    const existingSpeaker = speakerState.speakerMap.get(speakerId);
+    let language = null;
+
+    if (existingSpeaker) {
+      // Use existing speaker's language if it's in our pair
+      if (existingSpeaker.language.code === lockedLanguagePair.source.code ||
+          existingSpeaker.language.code === lockedLanguagePair.target.code) {
+        language = existingSpeaker.language;
+      } else {
+        // Default to source language if speaker's language isn't in our pair
+        language = lockedLanguagePair.source;
+        updateSpeaker(speakerId, lockedLanguagePair.source);
+      }
+    } else {
+      // For new speakers, assign the source language by default
+      language = lockedLanguagePair.source;
+      addSpeaker(speakerId, lockedLanguagePair.source);
+    }
+
+    console.log(`Language detection for ${speakerId}: ${language?.code}`);
+    return language;
+  };
+
+  // Add function to handle language pair selection from modal
+  const handleLanguagePairSelection = (pair: { source: { code: string, name: string }, target: { code: string, name: string } } | null) => {
+    if (pair) {
+      // Set the language pair
+      setLanguagePair(pair);
       
-      // Update active languages if we have at least one other speaker with a different language
-      if (speakerLanguages.length > 0) {
-        const mostRecentSpeaker = [...speakerLanguages].sort((a, b) => b.timestamp - a.timestamp)[0];
-        if (mostRecentSpeaker.language.code !== detectedLanguage.code) {
-          console.log('Updating active languages due to new speaker with different language');
-          setActiveLanguages([detectedLanguage, mostRecentSpeaker.language]);
-          setLanguagesJustDetected(true);
-          setTimeout(() => setLanguagesJustDetected(false), 1000);
+      // Log selection as a client event
+      logClientEvent({
+        selectedLanguagePair: pair
+      }, "language_pair_selected");
+      
+      // Add visual breadcrumb to transcript
+      addTranscriptBreadcrumb(
+        `Translation: ${pair.source.name} ↔ ${pair.target.name}`,
+        { languagePair: pair }
+      );
+      
+      // Create default speakers if none exist
+      const speakerId1 = `user-${Date.now()}-1`;
+      const speakerId2 = `user-${Date.now()}-2`;
+      
+      // Add speakers with the selected languages
+      addSpeaker(speakerId1, pair.source);
+      addSpeaker(speakerId2, pair.target);
+      
+      // Ensure existing speakers are updated with the new languages
+      const activeSpeakers = getActiveSpeakers();
+      
+      if (activeSpeakers.length > 0) {
+        // Update the first active speaker with source language
+        if (activeSpeakers[0]) {
+          updateSpeaker(activeSpeakers[0][0], pair.source);
+        }
+        
+        // If we have a second speaker, update with target language
+        if (activeSpeakers.length > 1) {
+          updateSpeaker(activeSpeakers[1][0], pair.target);
         }
       }
-    } else if (existingSpeaker.language.code !== detectedLanguage.code) {
-      console.log('Speaker language changed, updating speakerLanguages');
-      // Update speaker's language if it changed
-      setSpeakerLanguages(prev => prev.map(s => 
-        s.speakerId === speakerId 
-          ? {...s, language: detectedLanguage, timestamp: Date.now()}
-          : s
-      ));
       
-      // Update active languages if this speaker is one of the active ones and the language is different
-      setActiveLanguages(prev => {
-        if (prev.some(lang => lang.code === existingSpeaker.language.code)) {
-          const newLanguages = prev.map(lang => 
-            lang.code === existingSpeaker.language.code ? detectedLanguage : lang
-          );
-          // Only update if the languages are different
-          if (newLanguages[0].code !== newLanguages[1].code) {
-            console.log('Updating active languages due to speaker language change');
-            setLanguagesJustDetected(true);
-            setTimeout(() => setLanguagesJustDetected(false), 1000);
-            return newLanguages;
-          }
-        }
-        return prev;
-      });
+      // Update session to refresh the agent with new language settings
+      if (sessionStatus === "CONNECTED") {
+        updateSession(false);
+      }
     }
-
-    return detectedLanguage;
   };
-
-  // Helper function to check if text is a translation message
-  const isTranslationMessage = (text: string) => {
-    if (!text) return false;
-    
-    // Check for our translation format
-    if (text.match(/\[\w+ → \w+\]/)) {
-      return true;
-    }
-    
-    return false;
-  };
-
-  // Add effect to update UI when language pair changes
-  useEffect(() => {
-    if (lockedLanguagePair) {
-      setActiveLanguages([lockedLanguagePair.source, lockedLanguagePair.target]);
-      setLanguagesJustDetected(true);
-      setTimeout(() => setLanguagesJustDetected(false), 1000);
-    }
-  }, [lockedLanguagePair]);
 
   return (
     <div className="flex h-screen bg-white">
@@ -625,6 +629,15 @@ function App() {
       <div className="hidden">
         <Events isExpanded={false} />
       </div>
+
+      {/* Add the Language Selection Modal */}
+      <LanguageSelectionModal
+        isOpen={shouldShowLanguageModal}
+        onClose={handleLanguagePairSelection}
+        availableLanguages={availableLanguages}
+        initialSource={lockedLanguagePair?.source}
+        initialTarget={lockedLanguagePair?.target}
+      />
     </div>
   );
 }

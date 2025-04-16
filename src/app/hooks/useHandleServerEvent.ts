@@ -6,7 +6,6 @@ import { useEvent } from "@/app/contexts/EventContext";
 import { useRef, useState, useCallback } from "react";
 import { useLanguagePair } from "./useLanguagePair";
 import { SpeakerInfo } from "@/app/types";
-import { detectLanguageCode } from '../utils/languageDetection';
 
 interface UseHandleServerEventParams {
   setSessionStatus: (status: SessionStatus) => void;
@@ -124,16 +123,16 @@ export const useHandleServerEvent = ({
       return cachedResult;
     }
 
-    // Detect language if not in cache
-    const detectedLang = detectLanguageCode(text);
-    if (detectedLang) {
-      const result = { code: detectedLang, name: getLanguageName(detectedLang) };
+    // Instead of auto-detecting, use the locked pair
+    if (lockedLanguagePair && activeLanguages.length === 2) {
+      // Default to source language (first language in the pair)
+      const result = lockedLanguagePair.source;
       languageDetectionCache.current.set(text, result);
       return result;
     }
 
     return null;
-  }, []);
+  }, [lockedLanguagePair, activeLanguages]);
 
   // Helper function to check if text is already a translation
   const isTranslationMessage = (text: string) => {
@@ -163,25 +162,75 @@ export const useHandleServerEvent = ({
     if (functionCallParams.name === "translate_text") {
       console.log('Translation function called with args:', args);
       console.log('Current locked language pair:', lockedLanguagePair);
-      console.log('Active speakers:', activeSpeakers);
+      console.log('Active languages:', activeLanguages);
       
-      // Get the translation direction from useLanguagePair
-      const direction = getTranslationDirection(args.speaker_id);
+      // Create a translation direction object
+      let direction = null;
+      let translationArgs = args;
+      
+      // First, check if we have a locked language pair from user selection
+      if (lockedLanguagePair) {
+        // Determine direction based on source language in the request
+        const sourceLang = args.source_language;
+        
+        // If source is the first language in our pair, translate to the second
+        if (sourceLang === lockedLanguagePair.source.code) {
+          direction = {
+            source: lockedLanguagePair.source,
+            target: lockedLanguagePair.target
+          };
+        }
+        // If source is the second language in our pair, translate to the first
+        else if (sourceLang === lockedLanguagePair.target.code) {
+          direction = {
+            source: lockedLanguagePair.target, 
+            target: lockedLanguagePair.source
+          };
+        }
+        // If source doesn't match either language in our pair, use default pair direction
+        else {
+          direction = {
+            source: lockedLanguagePair.source,
+            target: lockedLanguagePair.target
+          };
+          console.log(`Source language ${sourceLang} not in language pair, using default direction`);
+        }
+        
+        // Log the selected direction
+        console.log(`Using locked language pair direction: ${direction.source.code} → ${direction.target.code}`);
+      }
+      // If no locked pair but we have active languages, use those
+      else if (activeLanguages && activeLanguages.length >= 2) {
+        // Default to first direction
+        direction = {
+          source: activeLanguages[0],
+          target: activeLanguages[1]
+        };
+        
+        // Check if source matches second language, then reverse
+        if (args.source_language === activeLanguages[1].code) {
+          direction = {
+            source: activeLanguages[1],
+            target: activeLanguages[0]
+          };
+        }
+        
+        console.log(`Using active languages for direction: ${direction.source.code} → ${direction.target.code}`);
+      }
       
       if (direction) {
-        console.log(`Translation direction: ${direction.source.code} → ${direction.target.code}`);
-
+        // Create a new object with the correct direction, preserving other args
+        translationArgs = {
+          ...args,
+          source_language: direction.source.code,
+          target_language: direction.target.code
+        };
+        
+        console.log('Calling translation with args:', translationArgs);
+        
         // Process the function call with the updated direction
         if (currentAgent?.toolLogic?.[functionCallParams.name]) {
           const fn = currentAgent.toolLogic[functionCallParams.name];
-          // Create a new object with the correct direction, preserving other args
-          const translationArgs = {
-            ...args,
-            source_language: direction.source.code,
-            target_language: direction.target.code
-          };
-          
-          console.log('Calling translation with args:', translationArgs);
           
           const fnResult = await fn(translationArgs, transcriptItems);
           addTranscriptBreadcrumb(
@@ -201,10 +250,31 @@ export const useHandleServerEvent = ({
         }
       } else {
         console.log('No translation direction available. Details:');
-        console.log('- Speaker ID:', args.speaker_id);
+        console.log('- Source language:', args.source_language);
+        console.log('- Target language:', args.target_language);
         console.log('- Locked language pair:', lockedLanguagePair);
-        console.log('- Active speakers:', activeSpeakers);
-        return;
+        console.log('- Active languages:', activeLanguages);
+        
+        // Fall back to using the args as provided
+        if (currentAgent?.toolLogic?.[functionCallParams.name]) {
+          console.log('Falling back to original args for translation');
+          const fn = currentAgent.toolLogic[functionCallParams.name];
+          const fnResult = await fn(args, transcriptItems);
+          
+          addTranscriptBreadcrumb(
+            `function call result: ${functionCallParams.name}`,
+            fnResult
+          );
+
+          sendClientEvent({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: functionCallParams.call_id,
+              output: JSON.stringify(fnResult),
+            },
+          });
+        }
       }
     } else {
       // Handle other function calls as before
@@ -234,45 +304,78 @@ export const useHandleServerEvent = ({
   const handleAudioTranscriptionComplete = useCallback(async (event: AudioTranscriptionCompleteEvent) => {
     const { transcription, speakerId } = event;
     
-    // Detect and cache language
-    const detectedLanguage = detectAndCacheLanguage(transcription);
-    if (!detectedLanguage) {
-      console.log('Could not detect language for:', transcription);
+    // Skip invalid transcriptions
+    if (!transcription || transcription === "[inaudible]" || transcription === "[Transcribing...]") {
+      console.log('Skipping invalid transcription');
       return;
     }
 
-    // Get translation direction based on detected language
-    const direction = getTranslationDirection(speakerId);
-    if (!direction) {
-      console.log('No translation direction available');
+    // Skip if already a translation message
+    if (isTranslationMessage(transcription)) {
+      console.log('Skipping translation: message is already a translation');
       return;
     }
 
+    // Get translation direction based on locked language pair
+    let sourceLanguage = null;
+    let targetLanguage = null;
+    
+    // Determine direction based on the locked language pair
+    if (lockedLanguagePair) {
+      // Try to detect which language the text is in (from our pair only)
+      // Since we disabled automatic language detection, estimate based on speaker info if available
+      const speaker = activeSpeakers.find(s => s.speakerId === speakerId);
+      
+      if (speaker) {
+        // If we know which language the speaker uses, translate to the other language in the pair
+        if (speaker.language.code === lockedLanguagePair.source.code) {
+          sourceLanguage = lockedLanguagePair.source;
+          targetLanguage = lockedLanguagePair.target;
+        } else if (speaker.language.code === lockedLanguagePair.target.code) {
+          sourceLanguage = lockedLanguagePair.target;
+          targetLanguage = lockedLanguagePair.source;
+        } else {
+          // Default to source->target if speaker language doesn't match either
+          sourceLanguage = lockedLanguagePair.source;
+          targetLanguage = lockedLanguagePair.target;
+        }
+      } else {
+        // If no speaker info, default to translating from source to target language
+        sourceLanguage = lockedLanguagePair.source;
+        targetLanguage = lockedLanguagePair.target;
+      }
+    } 
+    // If no locked pair but we have active languages, use those
+    else if (activeLanguages && activeLanguages.length >= 2) {
+      sourceLanguage = activeLanguages[0];
+      targetLanguage = activeLanguages[1];
+    }
+    
+    // Skip if we couldn't determine languages
+    if (!sourceLanguage || !targetLanguage) {
+      console.log('Could not determine source and target languages for translation');
+      return;
+    }
+    
     // Only translate if source and target languages are different
-    if (direction.source.code === direction.target.code) {
-      console.log(`Skipping translation: same language detected (${direction.source.code})`);
+    if (sourceLanguage.code === targetLanguage.code) {
+      console.log(`Skipping translation: same language (${sourceLanguage.code})`);
       return;
     }
+
+    console.log(`Translating from ${sourceLanguage.code} to ${targetLanguage.code}`);
 
     try {
       if (!translateAndSpeak || typeof translateAndSpeak !== 'function') {
         console.error('translateAndSpeak is not a function');
-        return;
-      }
-
-      console.log(`Translation direction: ${direction.source.code} → ${direction.target.code}`);
-
-      // Check if this is already a translation message
-      if (isTranslationMessage(transcription)) {
-        console.log('Skipping translation: message is already a translation');
         return;
       }
 
       // Translate the transcription
       const translatedText = await translateAndSpeak(
         transcription,
-        direction.source.code,
-        direction.target.code
+        sourceLanguage.code,
+        targetLanguage.code
       );
 
       if (translatedText) {
@@ -280,30 +383,77 @@ export const useHandleServerEvent = ({
         addMessage({
           id: translationId,
           role: 'assistant',
-          content: `[${direction.source.code} → ${direction.target.code}] ${translatedText}`,
+          content: `[${sourceLanguage.code} → ${targetLanguage.code}] ${translatedText}`,
           timestamp: Date.now()
         });
       }
     } catch (error) {
       console.error('Error in translation:', error);
     }
-  }, [getTranslationDirection, translateAndSpeak, addMessage, isTranslationMessage, detectAndCacheLanguage]);
+  }, [activeSpeakers, lockedLanguagePair, activeLanguages, translateAndSpeak, addMessage, isTranslationMessage]);
 
   const handleResponseDone = useCallback(async (event: ResponseDoneEvent) => {
     const { response, speakerId } = event;
     
+    // Skip invalid or already translated responses
+    if (!response || isTranslationMessage(response)) {
+      console.log('Skipping translation: invalid or already translated message');
+      return;
+    }
+    
     // Get translation direction based on locked language pair
-    const direction = getTranslationDirection(speakerId);
-    if (!direction) {
-      console.log('No translation direction available');
+    let sourceLanguage = null;
+    let targetLanguage = null;
+    
+    // Determine direction based on the locked language pair
+    if (lockedLanguagePair) {
+      // For assistant responses, we assume they're in the target language of the last user message
+      // and need to be translated back to the source language
+      
+      // Try to find the speaker associated with this response
+      const speaker = activeSpeakers.find(s => s.speakerId === speakerId);
+      
+      if (speaker) {
+        // If we know which language the speaker uses, translate assistant response to that language
+        if (speaker.language.code === lockedLanguagePair.source.code) {
+          // Assistant response is assumed to be in target language, translate to source
+          sourceLanguage = lockedLanguagePair.target;
+          targetLanguage = lockedLanguagePair.source;
+        } else if (speaker.language.code === lockedLanguagePair.target.code) {
+          // Assistant response is assumed to be in source language, translate to target
+          sourceLanguage = lockedLanguagePair.source;
+          targetLanguage = lockedLanguagePair.target;
+        } else {
+          // Default to target->source if speaker language doesn't match either
+          sourceLanguage = lockedLanguagePair.target;
+          targetLanguage = lockedLanguagePair.source;
+        }
+      } else {
+        // If no speaker info, default to translating from target to source language
+        sourceLanguage = lockedLanguagePair.target;
+        targetLanguage = lockedLanguagePair.source;
+      }
+    }
+    // If no locked pair but we have active languages, use those
+    else if (activeLanguages && activeLanguages.length >= 2) {
+      // For assistant responses, use reverse direction from user messages
+      sourceLanguage = activeLanguages[1];  // Second language is assumed to be target for user messages
+      targetLanguage = activeLanguages[0];  // First language is assumed to be source for user messages
+    }
+    
+    // Skip if we couldn't determine languages
+    if (!sourceLanguage || !targetLanguage) {
+      console.log('Could not determine source and target languages for translation');
+      return;
+    }
+    
+    // Only translate if source and target languages are different
+    if (sourceLanguage.code === targetLanguage.code) {
+      console.log(`Skipping translation: same language (${sourceLanguage.code})`);
       return;
     }
 
-    // Only translate if source and target languages are different
-    if (direction.source.code === direction.target.code) {
-      console.log(`Skipping translation: same language detected (${direction.source.code})`);
-      return;
-    }
+    console.log(`Translating assistant response from ${sourceLanguage.code} to ${targetLanguage.code}`);
 
     try {
       if (!translateAndSpeak || typeof translateAndSpeak !== 'function') {
@@ -311,19 +461,11 @@ export const useHandleServerEvent = ({
         return;
       }
 
-      console.log(`Translation direction: ${direction.source.code} → ${direction.target.code}`);
-
-      // Check if this is already a translation message
-      if (isTranslationMessage(response)) {
-        console.log('Skipping translation: message is already a translation');
-        return;
-      }
-
       // Translate the assistant's response
       const translatedText = await translateAndSpeak(
         response,
-        direction.target.code, // Assistant speaks in target language
-        direction.source.code  // Translate to source language
+        sourceLanguage.code,
+        targetLanguage.code
       );
 
       if (translatedText) {
@@ -331,14 +473,14 @@ export const useHandleServerEvent = ({
         addMessage({
           id: translationId,
           role: 'assistant',
-          content: `[${direction.target.code} → ${direction.source.code}] ${translatedText}`,
+          content: `[${sourceLanguage.code} → ${targetLanguage.code}] ${translatedText}`,
           timestamp: Date.now()
         });
       }
     } catch (error) {
       console.error('Error in translation:', error);
     }
-  }, [getTranslationDirection, translateAndSpeak, addMessage, isTranslationMessage]);
+  }, [activeSpeakers, lockedLanguagePair, activeLanguages, translateAndSpeak, addMessage, isTranslationMessage]);
 
   const handleServerEvent = (serverEvent: ServerEvent) => {
     logServerEvent(serverEvent);
