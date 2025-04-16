@@ -3,9 +3,16 @@
 import { ServerEvent, SessionStatus, AgentConfig } from "@/app/types";
 import { useTranscript } from "@/app/contexts/TranscriptContext";
 import { useEvent } from "@/app/contexts/EventContext";
-import { useRef, useState, useCallback } from "react";
+import { useRef, useCallback } from "react";
 import { useLanguagePair } from "./useLanguagePair";
-import { SpeakerInfo } from "@/app/types";
+
+// Declare the window property for recent translations cache
+declare global {
+  interface Window {
+    _recentTranslations: Map<string, number>;
+    _translatedItemIds: Set<string>;
+  }
+}
 
 interface UseHandleServerEventParams {
   setSessionStatus: (status: SessionStatus) => void;
@@ -156,6 +163,51 @@ export const useHandleServerEvent = ({
       let args = JSON.parse(functionCallParams.arguments);
       let translationArgs = args;
       const originalArgs = {...args}; // Store original args for logging
+      
+      // Check if this is a translation of something we just translated
+      // Get a simple hash of the text to help identify repeat translations
+      const textToTranslate = args.text;
+      const textHash = textToTranslate ? 
+        textToTranslate.substring(0, 20).replace(/\s+/g, '') : '';
+      
+      // Keep track of recent translations to avoid circular translations
+      if (!window._recentTranslations) {
+        window._recentTranslations = new Map();
+      }
+      
+      // Check if we've seen this text pattern recently, which would indicate a circular translation
+      const sourceLang = args.source_language;
+      const targetLang = args.target_language;
+      const translationKey = `${textHash}:${sourceLang}→${targetLang}`;
+      
+      if (window._recentTranslations.has(translationKey)) {
+        const timestamp = window._recentTranslations.get(translationKey);
+        // If this exact translation was requested in the last 3 seconds, it's likely circular
+        if (timestamp && (Date.now() - timestamp < 3000)) {
+          console.log('Skipping suspected circular translation:', {
+            text: textToTranslate,
+            source: sourceLang,
+            target: targetLang,
+            key: translationKey
+          });
+          
+          // Continue the conversation flow
+          sendClientEvent({ type: "response.create" });
+          return;
+        }
+      }
+      
+      // Record this translation attempt
+      window._recentTranslations.set(translationKey, Date.now());
+      
+      // Clean up old entries (keep only last 5 minutes of history)
+      const cleanupTime = Date.now() - 5 * 60 * 1000;
+      window._recentTranslations.forEach((timestamp, key) => {
+        if (timestamp < cleanupTime) {
+          window._recentTranslations.delete(key);
+        }
+      });
+      
       let direction = null;
       
       // First, check if we have a locked language pair from user selection
@@ -276,6 +328,32 @@ export const useHandleServerEvent = ({
               fnResult
             );
 
+            // Add the same display and announcement code here
+            if (fnResult && fnResult.translated_text) {
+              // Create a unique ID for this translation
+              const translationId = `translation-${Date.now()}`;
+              
+              // Add the translation to the transcript with proper formatting
+              addMessage({
+                id: translationId,
+                role: 'assistant',
+                content: `[${args.source_language} → ${args.target_language}] ${fnResult.translated_text}`,
+                timestamp: Date.now()
+              });
+              
+              // Also speak the translation
+              if (translateAndSpeak && typeof translateAndSpeak === 'function') {
+                // Use the translated text directly from the result
+                translateAndSpeak(
+                  fnResult.translated_text,
+                  args.target_language, // Source is already the target language
+                  args.target_language  // Keep same language for TTS
+                ).catch(error => {
+                  console.error('Error in TTS for fallback translation:', error);
+                });
+              }
+            }
+
             // Send the result to acknowledge completion of the function
             sendClientEvent({
               type: "conversation.item.create",
@@ -321,6 +399,32 @@ export const useHandleServerEvent = ({
               `function call result: ${functionCallParams.name}`,
               fnResult
             );
+
+            // Add the same display and announcement code here
+            if (fnResult && fnResult.translated_text) {
+              // Create a unique ID for this translation
+              const translationId = `translation-${Date.now()}`;
+              
+              // Add the translation to the transcript with proper formatting
+              addMessage({
+                id: translationId,
+                role: 'assistant',
+                content: `[${args.source_language} → ${args.target_language}] ${fnResult.translated_text}`,
+                timestamp: Date.now()
+              });
+              
+              // Also speak the translation
+              if (translateAndSpeak && typeof translateAndSpeak === 'function') {
+                // Use the translated text directly from the result
+                translateAndSpeak(
+                  fnResult.translated_text,
+                  args.target_language, // Source is already the target language
+                  args.target_language  // Keep same language for TTS
+                ).catch(error => {
+                  console.error('Error in TTS for fallback translation:', error);
+                });
+              }
+            }
 
             sendClientEvent({
               type: "conversation.item.create",
@@ -607,6 +711,11 @@ export const useHandleServerEvent = ({
   const handleServerEvent = (serverEvent: ServerEvent) => {
     logServerEvent(serverEvent);
 
+    // Track items we've already sent for translation
+    if (!window._translatedItemIds) {
+      window._translatedItemIds = new Set();
+    }
+
     switch (serverEvent.type) {
       case "session.created": {
         if (serverEvent.session?.id) {
@@ -766,30 +875,56 @@ export const useHandleServerEvent = ({
 
         // Process function calls in response
         if (serverEvent.response?.output) {
+          // Group function calls to avoid duplicate translations
+          const functionCalls = new Map();
+          
+          // First collect all function calls in this batch
           serverEvent.response.output.forEach((outputItem) => {
             if (
               outputItem.type === "function_call" &&
               outputItem.name &&
               outputItem.arguments
             ) {
-              // Get the most recent active speaker
-              const mostRecentSpeaker = activeSpeakers
-                .filter(s => s.isActive)
-                .sort((a, b) => b.timestamp - a.timestamp)[0];
-
-              // Parse the arguments and add the speaker ID
-              const args = JSON.parse(outputItem.arguments);
-              if (mostRecentSpeaker) {
-                args.speaker_id = mostRecentSpeaker.speakerId;
-              }
-
-              handleFunctionCall({
+              // Use function name and call_id as key to deduplicate
+              const callKey = `${outputItem.name}:${outputItem.call_id}`;
+              functionCalls.set(callKey, {
                 name: outputItem.name,
                 call_id: outputItem.call_id,
-                arguments: JSON.stringify(args),
+                arguments: outputItem.arguments
               });
             }
           });
+          
+          // Now process the deduplicated function calls
+          for (const functionCall of functionCalls.values()) {
+            // Get the most recent active speaker
+            const mostRecentSpeaker = activeSpeakers
+              .filter(s => s.isActive)
+              .sort((a, b) => b.timestamp - a.timestamp)[0];
+
+            // Parse the arguments and add the speaker ID
+            const args = JSON.parse(functionCall.arguments);
+            if (mostRecentSpeaker) {
+              args.speaker_id = mostRecentSpeaker.speakerId;
+            }
+
+            // Check if we've already processed this exact function call
+            const callWithArgsKey = `${functionCall.name}:${JSON.stringify(args)}`;
+            if (window._translatedItemIds.has(callWithArgsKey)) {
+              console.log(`Skipping duplicate function call: ${callWithArgsKey}`);
+              continue;
+            }
+            
+            // Mark this function call as processed
+            window._translatedItemIds.add(callWithArgsKey);
+            
+            // Process the function call
+            handleFunctionCall({
+              name: functionCall.name,
+              call_id: functionCall.call_id,
+              arguments: JSON.stringify(args),
+            });
+          }
         }
         break;
       }
