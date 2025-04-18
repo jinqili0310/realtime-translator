@@ -6,12 +6,6 @@ import { useEvent } from "@/app/contexts/EventContext";
 import { useRef, useCallback } from "react";
 import { useLanguagePair } from "./useLanguagePair";
 
-// Helper function to log OpenAI models used
-const logOpenAIModel = (functionName: string, modelName: string | undefined) => {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] 🤖 OpenAI MODEL USED: ${modelName || 'default'} - Function: ${functionName}`);
-};
-
 // Declare the window property for recent translations cache
 declare global {
   interface Window {
@@ -167,10 +161,6 @@ export const useHandleServerEvent = ({
     // For translation functions, modify the target language before logging
     if (functionCallParams.name === "translate_text") {
       let args = JSON.parse(functionCallParams.arguments);
-      
-      // Log the model used for translation
-      logOpenAIModel('translate_text', args.model || 'gpt-3.5-turbo');
-      
       let translationArgs = args;
       const originalArgs = {...args}; // Store original args for logging
       
@@ -333,36 +323,47 @@ export const useHandleServerEvent = ({
             const fnResult = await fn(args, transcriptItems);
             console.log('Translation result:', fnResult);
             
-            addTranscriptBreadcrumb(
-              `function call result: ${functionCallParams.name}`,
-              fnResult
-            );
-
-            // Add the same display and announcement code here
+            // Ensure the translation is displayed and announced
             if (fnResult && fnResult.translated_text) {
               // Create a unique ID for this translation
-              const translationId = `translation-${Date.now()}`;
+              const translationId = `translation-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+              console.log(`Adding translation to UI with ID: ${translationId}`);
+              
+              // Format the message for display
+              const formattedContent = `[${args.source_language} → ${args.target_language}] ${fnResult.translated_text}`;
               
               // Add the translation to the transcript with proper formatting
               addMessage({
                 id: translationId,
                 role: 'assistant',
-                content: `[${args.source_language} → ${args.target_language}] ${fnResult.translated_text}`,
+                content: formattedContent,
                 timestamp: Date.now()
               });
               
-              // Also speak the translation
+              // Log that we're adding this message
+              console.log(`Added translation message to transcript: ${formattedContent}`);
+              
+              // Also speak the translation if it's going to the target language
               if (translateAndSpeak && typeof translateAndSpeak === 'function') {
+                console.log(`Speaking translation: ${fnResult.translated_text}`);
                 // Use the translated text directly from the result
                 translateAndSpeak(
                   fnResult.translated_text,
-                  args.target_language, // Source is already the target language
+                  args.target_language, // Source is already the target language 
                   args.target_language  // Keep same language for TTS
                 ).catch(error => {
-                  console.error('Error in TTS for fallback translation:', error);
+                  console.error('Error in TTS for translation:', error);
                 });
               }
+            } else {
+              console.warn('Translation result missing translated_text property:', fnResult);
             }
+            
+            // Add breadcrumb for debugging
+            addTranscriptBreadcrumb(
+              `function call result: ${functionCallParams.name}`,
+              fnResult
+            );
 
             // Send the result to acknowledge completion of the function
             sendClientEvent({
@@ -400,31 +401,36 @@ export const useHandleServerEvent = ({
         );
         
         if (currentAgent?.toolLogic?.[functionCallParams.name]) {
-          console.log('Falling back to original args for translation');
+          console.log('Falling back to original args for translation:', args);
           const fn = currentAgent.toolLogic[functionCallParams.name];
           try {
+            console.log('Falling back to original args for translation:', args);
             const fnResult = await fn(args, transcriptItems);
+            console.log('Fallback translation result:', fnResult);
             
-            addTranscriptBreadcrumb(
-              `function call result: ${functionCallParams.name}`,
-              fnResult
-            );
-
-            // Add the same display and announcement code here
+            // Ensure the translation is displayed and announced even in fallback case
             if (fnResult && fnResult.translated_text) {
               // Create a unique ID for this translation
-              const translationId = `translation-${Date.now()}`;
+              const translationId = `translation-fallback-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+              console.log(`Adding fallback translation to UI with ID: ${translationId}`);
+              
+              // Format the message for display
+              const formattedContent = `[${args.source_language} → ${args.target_language}] ${fnResult.translated_text}`;
               
               // Add the translation to the transcript with proper formatting
               addMessage({
                 id: translationId,
                 role: 'assistant',
-                content: `[${args.source_language} → ${args.target_language}] ${fnResult.translated_text}`,
+                content: formattedContent,
                 timestamp: Date.now()
               });
               
+              // Log that we're adding this message
+              console.log(`Added fallback translation message to transcript: ${formattedContent}`);
+              
               // Also speak the translation
               if (translateAndSpeak && typeof translateAndSpeak === 'function') {
+                console.log(`Speaking fallback translation: ${fnResult.translated_text}`);
                 // Use the translated text directly from the result
                 translateAndSpeak(
                   fnResult.translated_text,
@@ -434,7 +440,15 @@ export const useHandleServerEvent = ({
                   console.error('Error in TTS for fallback translation:', error);
                 });
               }
+            } else {
+              console.warn('Fallback translation result missing translated_text property:', fnResult);
             }
+            
+            // Add breadcrumb for debugging
+            addTranscriptBreadcrumb(
+              `function call result: ${functionCallParams.name}`,
+              fnResult
+            );
 
             sendClientEvent({
               type: "conversation.item.create",
@@ -587,16 +601,37 @@ export const useHandleServerEvent = ({
       );
 
       if (translatedText) {
-        console.log(`Translation result: "${translatedText.substring(0, 30)}${translatedText.length > 30 ? '...' : ''}"`);
-        const translationId = `translation-${speakerId}-${Date.now()}`;
+        const translationId = `translation-${speakerId}-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+        console.log(`Adding transcription translation to UI with ID: ${translationId}`);
+        
+        // Format the message for display
+        const formattedContent = `[${sourceLanguage.code} → ${targetLanguage.code}] ${translatedText}`;
+        
+        // Add to transcript
         addMessage({
           id: translationId,
           role: 'assistant',
-          content: `[${sourceLanguage.code} → ${targetLanguage.code}] ${translatedText}`,
+          content: formattedContent,
           timestamp: Date.now()
         });
+        
+        console.log(`Added transcription translation to UI: ${formattedContent}`);
+        
+        // Also speak the translation
+        if (translateAndSpeak && typeof translateAndSpeak === 'function') {
+          console.log(`Speaking transcription translation: ${translatedText}`);
+          try {
+            await translateAndSpeak(
+              translatedText,  
+              targetLanguage.code,  // Already in target language
+              targetLanguage.code   // Keep same language for TTS
+            );
+          } catch (ttsError) {
+            console.error('Error in TTS for transcription translation:', ttsError);
+          }
+        }
       } else {
-        console.log('No translation result returned');
+        console.warn('No translation result returned for transcription');
       }
     } catch (error) {
       console.error('Error in translation:', error);
@@ -702,16 +737,37 @@ export const useHandleServerEvent = ({
       );
 
       if (translatedText) {
-        console.log(`Translation result: "${translatedText.substring(0, 30)}${translatedText.length > 30 ? '...' : ''}"`);
-        const translationId = `translation-${speakerId}-${Date.now()}`;
+        const translationId = `translation-response-${speakerId}-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+        console.log(`Adding assistant response translation to UI with ID: ${translationId}`);
+        
+        // Format the message for display
+        const formattedContent = `[${sourceLanguage.code} → ${targetLanguage.code}] ${translatedText}`;
+        
+        // Add to transcript
         addMessage({
           id: translationId,
           role: 'assistant',
-          content: `[${sourceLanguage.code} → ${targetLanguage.code}] ${translatedText}`,
+          content: formattedContent,
           timestamp: Date.now()
         });
+        
+        console.log(`Added assistant response translation to UI: ${formattedContent}`);
+        
+        // Also speak the translation
+        if (translateAndSpeak && typeof translateAndSpeak === 'function') {
+          console.log(`Speaking assistant response translation: ${translatedText}`);
+          try {
+            await translateAndSpeak(
+              translatedText,
+              targetLanguage.code,  // Already in target language
+              targetLanguage.code   // Keep same language for TTS
+            );
+          } catch (ttsError) {
+            console.error('Error in TTS for assistant response translation:', ttsError);
+          }
+        }
       } else {
-        console.log('No translation result returned for assistant response');
+        console.warn('No translation result returned for assistant response');
       }
     } catch (error) {
       console.error('Error in assistant response translation:', error);
